@@ -1,0 +1,25 @@
+syncable: true
+services:
+  - type: web
+    name: mg-yemot-bridge
+    runtime: docker
+    plan: starter        # paid, always-on - the free plan sleeps after 15 min
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: SAIC_USER
+        sync: false
+      - key: SAIC_PASSWORD
+        sync: false
+      - key: SAIC_REGION
+        value: eu
+      - key: MG_ACCOUNT
+        sync: false
+      - key: MG_VEHICLE_ID
+        sync: false
+      - key: YEMOT_TOKEN
+        sync: false
+      - key: YEMOT_PIN
+        sync: false
+      - key: YEMOT_ALLOWED_NUMBERS
+        sync: false
