@@ -1,6 +1,10 @@
 """
-Bridge between a Yemot Hamashiach (ימות המשיח) IVR extension and an MG car,
-via the SAIC iSMART MQTT gateway (https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway).
+Bridge between a Yemot Hamashiach (ימות המשיח) IVR extension and one or more
+cars, via a per-brand adapter (see vehicles/).
+
+This file only knows the Yemot IVR protocol and call authentication - it has
+NO car-brand-specific logic. Each brand (MG today, Maxus/others later) is a
+separate module in vehicles/ implementing the VehicleAdapter interface.
 
 Flow:
   1. Yemot calls this server's /yemot endpoint on every step of the call
@@ -8,8 +12,9 @@ Flow:
   2. This server replies with a small plain-text "mini language" that Yemot
      understands: id_list_message (play a message), read (ask for digits and
      store them under a variable name), hangup, etc.
-  3. When the caller picks a car action, we publish an MQTT command to the
-     gateway, which talks to MG's cloud on our behalf.
+  3. Caller enters a PIN, then (if more than one brand is configured on this
+     deployment) picks which car, then picks an action from that car's menu.
+     Each adapter turns the chosen digit into a real command to the car.
 
 NOTE ON PROTOCOL ACCURACY:
   The exact Yemot response syntax below is based on community documentation
@@ -20,19 +25,22 @@ NOTE ON PROTOCOL ACCURACY:
   parameter names below (ApiPhone, ApiCallId, read=...,varname, etc.) are the
   most likely candidates but may need small adjustments.
 
-  The MQTT topic names, on the other hand, ARE verified directly against the
-  gateway's own source code (src/mqtt_topics.py in
-  SAIC-iSmart-API/saic-python-mqtt-gateway) - not guessed.
+CONFIGURING WHICH BRANDS ARE ACTIVE:
+  Set VEHICLES to a comma-separated list of brand ids, e.g. "mg" or
+  "mg,maxus". Defaults to "mg" alone for backward compatibility with the
+  original single-car deployment. Each brand only needs its own env vars
+  (see .env.example) - unconfigured/irrelevant vars are simply unused by the
+  other brands' adapters.
 """
 
 import os
 import re
 import time
-import threading
 import logging
 
 from flask import Flask, request, Response
-import paho.mqtt.client as mqtt
+
+from vehicles.registry import ADAPTER_CLASSES
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("yemot-bridge")
@@ -46,132 +54,43 @@ ALLOWED_NUMBERS = {
     n.strip() for n in os.environ.get("YEMOT_ALLOWED_NUMBERS", "").split(",") if n.strip()
 }
 
-# Everything runs in ONE container on Render, so the broker is always local.
-MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
-
-MG_ACCOUNT = os.environ.get("MG_ACCOUNT", "")
-# MG_VEHICLE_ID must be the car's VIN, exactly as printed in the mg-gateway
-# startup logs - the gateway's own topic scheme is saic/<user>/vehicles/<VIN>.
-MG_VEHICLE_ID = os.environ.get("MG_VEHICLE_ID", "")
-MQTT_TOPIC_ROOT = os.environ.get("MQTT_TOPIC", "saic")
-BASE_TOPIC = f"{MQTT_TOPIC_ROOT}/{MG_ACCOUNT}/vehicles/{MG_VEHICLE_ID}"
-
 # Render assigns a port dynamically via $PORT - always bind to that if present.
 PORT = int(os.environ.get("PORT", os.environ.get("BRIDGE_PORT", "10000")))
 
 # ---------------------------------------------------------------------------
-# MQTT client - keeps a live cache of the last known vehicle status, and lets
-# us publish commands to the gateway.
+# Vehicle adapters - one instance per brand listed in VEHICLES.
 # ---------------------------------------------------------------------------
-status_cache = {}
+_brand_ids = [b.strip() for b in os.environ.get("VEHICLES", "mg").split(",") if b.strip()]
 
-def on_connect(client, userdata, flags, rc):
-    log.info("Connected to MQTT broker (rc=%s), subscribing to %s/#", rc, BASE_TOPIC)
-    client.subscribe(f"{BASE_TOPIC}/#")
+adapters = {}
+for _brand in _brand_ids:
+    _cls = ADAPTER_CLASSES.get(_brand)
+    if not _cls:
+        log.warning("Unknown brand id %r in VEHICLES (known: %s) - skipping",
+                    _brand, ", ".join(ADAPTER_CLASSES))
+        continue
+    adapters[_brand] = _cls()
 
-def on_message(client, userdata, msg):
-    key = msg.topic[len(BASE_TOPIC) + 1:]
-    try:
-        status_cache[key] = msg.payload.decode("utf-8", errors="replace")
-    except Exception:
-        status_cache[key] = str(msg.payload)
+if not adapters:
+    raise RuntimeError(
+        f"No valid brand in VEHICLES={os.environ.get('VEHICLES')!r}. "
+        f"Known brands: {', '.join(ADAPTER_CLASSES)}"
+    )
 
-mqtt_client = mqtt.Client()
-mqtt_client.on_connect = on_connect
-mqtt_client.on_message = on_message
+SINGLE_BRAND = next(iter(adapters)) if len(adapters) == 1 else None
 
-def start_mqtt():
-    while True:
-        try:
-            mqtt_client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
-            mqtt_client.loop_forever()
-        except Exception as e:
-            log.warning("MQTT connection failed (%s), retrying in 5s", e)
-            time.sleep(5)
+_HEBREW_DIGIT_WORDS = [
+    "אחת", "שתיים", "שלוש", "ארבע", "חמש", "שש", "שבע", "שמונה", "תשע",
+]
 
-threading.Thread(target=start_mqtt, daemon=True).start()
+def vehicle_select_prompt() -> str:
+    parts = [
+        f"לחץ {_HEBREW_DIGIT_WORDS[i]} עבור {adapter.display_name}."
+        for i, adapter in enumerate(adapters.values())
+    ]
+    return " ".join(parts)
 
-def publish(subtopic: str, payload: str):
-    topic = f"{BASE_TOPIC}/{subtopic}"
-    log.info("Publishing %s -> %s", topic, payload)
-    mqtt_client.publish(topic, payload, qos=1, retain=False)
-
-# ---------------------------------------------------------------------------
-# Car actions
-# ---------------------------------------------------------------------------
-def action_ac_on():
-    publish("climate/remoteClimateState/set", "on")
-    return "הפקודה להדלקת המזגן נשלחה. הרכב אמור להגיב תוך דקה עד שתיים."
-
-def action_ac_off():
-    publish("climate/remoteClimateState/set", "off")
-    return "הפקודה לכיבוי המזגן נשלחה."
-
-def action_lock():
-    publish("doors/locked/set", "true")
-    return "הפקודה לנעילת הדלתות נשלחה."
-
-def action_unlock():
-    publish("doors/locked/set", "false")
-    return "הפקודה לפתיחת הדלתות נשלחה."
-
-def action_find_car():
-    publish("location/findMyCar/set", "activate")
-
-    def stop_later():
-        time.sleep(20)
-        publish("location/findMyCar/set", "stop")
-
-    threading.Thread(target=stop_later, daemon=True).start()
-    return "הרכב יצפצף ויהבהב באורות למשך כעשרים שניות."
-
-def action_status():
-    # Topic names verified against src/mqtt_topics.py in the gateway repo.
-    soc = status_cache.get("drivetrain/soc")
-    fuel = status_cache.get("drivetrain/fossilFuel/percentage")  # relevant for the S9 PHEV
-    locked = status_cache.get("doors/locked")
-    lat = status_cache.get("location/latitude")
-    lon = status_cache.get("location/longitude")
-
-    parts = []
-    if soc:
-        parts.append(f"רמת הסוללה {soc} אחוז")
-    else:
-        parts.append("אין עדיין נתון על רמת הסוללה")
-
-    if fuel:
-        parts.append(f"רמת הדלק {fuel} אחוז")
-
-    if locked is not None:
-        locked_txt = "נעולה" if locked.lower() in ("true", "1", "locked") else "לא נעולה"
-        parts.append(f"הרכב {locked_txt}")
-
-    if lat and lon:
-        parts.append("יש נתון מיקום עדכני לרכב")
-    else:
-        parts.append("אין עדיין נתון מיקום")
-
-    return ". ".join(parts) + "."
-
-MENU = {
-    "1": action_ac_on,
-    "2": action_ac_off,
-    "3": action_lock,
-    "4": action_unlock,
-    "5": action_status,
-    "6": action_find_car,
-}
-
-MENU_PROMPT = (
-    "לחץ אחת להדלקת מזגן. "
-    "לחץ שתיים לכיבוי מזגן. "
-    "לחץ שלוש לנעילת דלתות. "
-    "לחץ ארבע לפתיחת דלתות. "
-    "לחץ חמש לשמיעת סטטוס הרכב. "
-    "לחץ שש לצפצוף ואיתור הרכב. "
-    "לחץ כוכבית לסיום."
-)
+_brand_by_index = list(adapters.keys())
 
 # ---------------------------------------------------------------------------
 # Yemot protocol helpers
@@ -200,6 +119,7 @@ def yemot_response(body: str) -> Response:
 # Call-state tracking (very small in-memory store, fine for personal use)
 # ---------------------------------------------------------------------------
 authenticated_calls = {}  # call_id -> last_seen_timestamp
+call_vehicle = {}         # call_id -> brand_id, once chosen for this call
 CALL_TTL_SECONDS = 30 * 60
 
 def touch_call(call_id: str):
@@ -208,6 +128,7 @@ def touch_call(call_id: str):
     stale = [cid for cid, ts in authenticated_calls.items() if time.time() - ts > CALL_TTL_SECONDS]
     for cid in stale:
         authenticated_calls.pop(cid, None)
+        call_vehicle.pop(cid, None)
 
 # ---------------------------------------------------------------------------
 # Main webhook
@@ -231,43 +152,67 @@ def yemot_webhook():
             combine(id_list_message("מצטערים, מספר זה אינו מורשה להשתמש בשירות."), hangup())
         )
 
-    # Step 1: PIN entry
-    if "mg_pin" in params:
-        if not YEMOT_PIN or params["mg_pin"] != YEMOT_PIN:
+    # Step 1: PIN entry.
+    # NOTE: we branch on server-side call state (authenticated_calls), NOT on
+    # "is car_pin present in params" - Yemot may keep echoing back earlier
+    # collected fields (car_pin included) on every later hit of the same
+    # call, and branching on their mere presence would re-trigger this block
+    # forever, trapping the caller in a loop that never reaches the menu.
+    if call_id not in authenticated_calls:
+        if "car_pin" not in params:
+            # very first hit of the call - nothing collected yet.
+            return yemot_response(read_digits("נא להקליד קוד סודי בן ארבע ספרות", "car_pin"))
+        if not YEMOT_PIN or params["car_pin"] != YEMOT_PIN:
             log.warning("Wrong PIN attempt from %s", phone)
             return yemot_response(combine(id_list_message("קוד שגוי. השיחה תנותק."), hangup()))
         touch_call(call_id)
-        return yemot_response(read_digits(MENU_PROMPT, "mg_choice"))
-
-    if call_id not in authenticated_calls:
-        return yemot_response(read_digits("נא להקליד קוד סודי בן ארבע ספרות", "mg_pin"))
+        if SINGLE_BRAND:
+            call_vehicle[call_id] = SINGLE_BRAND
+            return yemot_response(read_digits(adapters[SINGLE_BRAND].menu_prompt(), "car_choice"))
+        return yemot_response(read_digits(vehicle_select_prompt(), "car_select"))
 
     touch_call(call_id)
 
-    # Step 2: menu choice
-    choice = params.get("mg_choice", "")
+    # Step 2: vehicle selection (only when more than one brand is configured
+    # and this call hasn't picked one yet)
+    if call_id not in call_vehicle:
+        idx = params.get("car_select", "")
+        chosen = None
+        if idx.isdigit() and 1 <= int(idx) <= len(_brand_by_index):
+            chosen = _brand_by_index[int(idx) - 1]
+        if not chosen:
+            return yemot_response(read_digits("בחירה לא תקינה. " + vehicle_select_prompt(), "car_select"))
+        call_vehicle[call_id] = chosen
+        return yemot_response(read_digits(adapters[chosen].menu_prompt(), "car_choice"))
+
+    # Step 3: action choice within the already-chosen vehicle
+    adapter = adapters[call_vehicle[call_id]]
+    choice = params.get("car_choice", "")
 
     if choice == "*":
         return yemot_response(combine(id_list_message("להתראות."), hangup()))
 
-    action = MENU.get(choice)
-    if not action:
-        return yemot_response(read_digits("בחירה לא תקינה. " + MENU_PROMPT, "mg_choice"))
-
     try:
-        result_text = action()
-    except Exception as e:
+        result_text = adapter.handle_choice(choice)
+    except Exception:
         log.exception("Action failed")
         result_text = "אירעה שגיאה בביצוע הפעולה."
 
+    if result_text is None:
+        return yemot_response(read_digits("בחירה לא תקינה. " + adapter.menu_prompt(), "car_choice"))
+
     return yemot_response(
-        combine(id_list_message(result_text), read_digits(MENU_PROMPT, "mg_choice"))
+        combine(id_list_message(result_text), read_digits(adapter.menu_prompt(), "car_choice"))
     )
 
 
 @app.route("/health")
 def health():
-    return {"ok": True, "cached_keys": list(status_cache.keys())}
+    info = {"ok": True, "vehicles": list(adapters)}
+    mg = adapters.get("mg")
+    if mg is not None:
+        info["mg_cached_keys"] = list(mg.status_cache.keys())
+    return info
 
 
 if __name__ == "__main__":

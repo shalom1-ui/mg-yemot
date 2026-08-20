@@ -44,6 +44,7 @@ RUN ${GATEWAY_VENV}/bin/pip install --no-cache-dir flask paho-mqtt
 
 # ---- Yemot bridge ----
 COPY bridge/yemot_bridge.py /usr/src/bridge/yemot_bridge.py
+COPY bridge/vehicles/ /usr/src/bridge/vehicles/
 
 # ---- Mosquitto config ----
 COPY mosquitto/config/mosquitto.conf /etc/mosquitto/mosquitto.conf

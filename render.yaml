@@ -7,6 +7,8 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
+      - key: VEHICLES
+        value: mg,maxus
       - key: SAIC_USER
         sync: false
       - key: SAIC_PASSWORD
