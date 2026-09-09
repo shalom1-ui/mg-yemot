@@ -40,7 +40,14 @@ COPY --from=gw-builder /usr/src/app/src/ /usr/src/gateway/
 COPY --from=gw-builder /usr/src/app/examples/ /usr/src/gateway/
 # Our own bridge needs to talk MQTT too - add it to the same venv so both
 # processes share one consistent, known-good Python environment.
-RUN ${GATEWAY_VENV}/bin/pip install --no-cache-dir flask paho-mqtt
+# NOTE: recent Poetry versions no longer install pip into the venvs they
+# create, so `${GATEWAY_VENV}/bin/pip` doesn't exist yet at this point
+# (this broke the first real Render build with "exit code: 127" - command
+# not found). `ensurepip` is part of the Python standard library itself and
+# works fully offline, so it's a reliable way to bootstrap pip into this
+# venv before using it.
+RUN ${GATEWAY_VENV}/bin/python -m ensurepip --upgrade \
+    && ${GATEWAY_VENV}/bin/python -m pip install --no-cache-dir flask paho-mqtt
 
 # ---- Yemot bridge ----
 COPY bridge/yemot_bridge.py /usr/src/bridge/yemot_bridge.py
