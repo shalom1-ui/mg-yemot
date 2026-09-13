@@ -46,8 +46,12 @@ COPY --from=gw-builder /usr/src/app/examples/ /usr/src/gateway/
 # not found). `ensurepip` is part of the Python standard library itself and
 # works fully offline, so it's a reliable way to bootstrap pip into this
 # venv before using it.
+# paho-mqtt is pinned to 1.6.1 (matching bridge/requirements.txt) - without
+# a pin this used to silently install the latest paho-mqtt 2.x, which
+# changed its Client() API/defaults and is suspected of causing an MQTT
+# "protocol error" reconnect loop seen in production logs.
 RUN ${GATEWAY_VENV}/bin/python -m ensurepip --upgrade \
-    && ${GATEWAY_VENV}/bin/python -m pip install --no-cache-dir flask paho-mqtt
+    && ${GATEWAY_VENV}/bin/python -m pip install --no-cache-dir flask "paho-mqtt==1.6.1"
 
 # ---- Yemot bridge ----
 COPY bridge/yemot_bridge.py /usr/src/bridge/yemot_bridge.py
