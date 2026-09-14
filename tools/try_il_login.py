@@ -74,8 +74,11 @@ def sha1_hex(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
-def hmac_sha256_hex(message: str, key_hex: str) -> str:
-    return hmac.new(bytes.fromhex(key_hex), message.encode("utf-8"), hashlib.sha256).hexdigest()
+def hmac_sha256_hex(message: str, key_hex_string: str) -> str:
+    # JS: CryptoJS.enc.Utf8.parse(a) - the hex-digest STRING is treated as
+    # literal UTF-8 text for the HMAC key, unlike AES's key/iv which DO get
+    # hex-decoded via CryptoJS.enc.Hex.parse. Do not bytes.fromhex() here.
+    return hmac.new(key_hex_string.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def aes128_encrypt_hex(key_hex: str, iv_hex: str, plaintext: str) -> str:
@@ -149,19 +152,38 @@ def login(username: str, password: str):
     url = BASE_URL + path
     print(f"POST {url}")
     print(f"headers: {headers}")
-    resp = requests.post(url, headers=headers, data=bytes.fromhex(body_hex), timeout=15)
+    # IMPORTANT: the JS never converts the hex ciphertext string to raw
+    # bytes before sending - `getEncryptBody`'s result (a JS string of hex
+    # characters) is assigned directly to the axios request body, so the
+    # wire body is the *literal hex text*, not the bytes it represents.
+    resp = requests.post(url, headers=headers, data=body_hex, timeout=15)
     print(f"HTTP {resp.status_code}")
+    print(f"response headers: {dict(resp.headers)}")
     raw = resp.text
     print(f"raw response ({len(raw)} chars): {raw[:300]}")
 
-    if resp.status_code == 200 and raw:
-        try:
-            decrypted = aes128_decrypt_hex(aes_key, aes_iv, raw.strip())
-            print("DECRYPTED RESPONSE:")
-            print(decrypted)
-        except Exception as e:
-            print(f"(response wasn't decryptable with the request's own key/iv - {type(e).__name__}: {e})")
-            print("This likely means the response uses different key derivation than assumed - see getSignatureParam in research/NOTES.md, may need the response's own headers, not the request's.")
+    if raw:
+        # Decryption uses the RESPONSE's own APP-SEND-DATE/ORIGINAL-CONTENT-TYPE
+        # headers (getSignatureParam in the JS operates on the response
+        # object, not the request) - NOT the request's key/iv.
+        resp_send_date = resp.headers.get("APP-SEND-DATE")
+        resp_content_type = resp.headers.get("ORIGINAL-CONTENT-TYPE")
+        if resp_send_date and resp_content_type:
+            resp_key = md5_hex(f"{resp_send_date}1{resp_content_type}")
+            resp_iv = md5_hex(resp_send_date)
+            print(f"resp_key={resp_key} resp_iv={resp_iv}")
+            try:
+                decrypted = aes128_decrypt_hex(resp_key, resp_iv, raw.strip())
+                print("DECRYPTED RESPONSE:")
+                print(decrypted)
+            except Exception as e:
+                print(f"(still not decryptable - {type(e).__name__}: {e})")
+                # diagnostic: decrypt WITHOUT unpadding to see if the bytes
+                # look close to plausible JSON despite a padding mismatch
+                raw_pt = AES.new(bytes.fromhex(resp_key), AES.MODE_CBC, bytes.fromhex(resp_iv)).decrypt(bytes.fromhex(raw.strip()))
+                print(f"raw decrypted bytes (no unpad): {raw_pt!r}")
+        else:
+            print("(response has no APP-SEND-DATE/ORIGINAL-CONTENT-TYPE headers to decrypt with)")
 
 
 if __name__ == "__main__":

@@ -187,6 +187,74 @@ left except things a working request could confirm/refute:**
   and `Crypto.Cipher.AES` (pycryptodome) in CBC mode with PKCS7 padding
   for the AES128Encrypt/decrypt pair (raw hex key/iv via `bytes.fromhex`).
 
+## UPDATE 2026-09-14 (continued): tools/try_il_login.py live-tested, request signing CONFIRMED working
+
+Actually ran `tools/try_il_login.py` against the real `opt-svc.soimt.com`
+server (with the real, confirmed-correct account credentials) and
+iterated live off real error responses - this is no longer theoretical:
+
+1. First attempt: sent the AES ciphertext **hex-decoded to raw bytes** as
+   the POST body → server error `{"code":500,"msg":"Input length = 1",...}`.
+   **Fix:** send the hex *string* itself as the literal body text (the JS
+   never converts it to raw bytes - `getEncryptBody`'s return value, a JS
+   string of hex chars, is assigned directly as `e.data`/axios body).
+2. Second attempt (body fixed): got
+   `{"code":400,"msg":"APP-VERIFICATION-STRING Verify Failed.","success":false}`.
+   **Fix:** the HMAC key (`O` in the JS) must be passed through
+   `CryptoJS.enc.Utf8.parse(a)` - i.e. the 32-character MD5 hex-digest
+   **string** is used as literal UTF-8 text for the HMAC key (32 bytes),
+   **not** hex-decoded to 16 raw bytes like the AES key/IV are. This was
+   the bug - fixed in `hmac_sha256_hex()`.
+3. Third attempt (signing fixed): **HTTP 400 error is gone.** Now getting
+   **HTTP 404** with a 224-hex-char (112-byte) response body that is
+   clearly ciphertext (not readable JSON, unlike attempts 1-2 which
+   returned plain-text JSON errors) - i.e. **the server accepted our
+   signed+encrypted request and processed it**, this is no longer a
+   request-format rejection. This is very likely either (a) a real
+   "user/route not found"-style error caused by one of the guessed login
+   fields (`deviceType`/`deviceId`/`loginType`/`countryCode` - see the
+   TODO markers in the script) being wrong enough to fail account lookup,
+   or (b) a gateway-level 404 unrelated to our payload at all.
+4. **Still unsolved: decrypting this response.** The response DOES carry
+   its own `APP-SEND-DATE` / `ORIGINAL-CONTENT-TYPE` / `APP-VERIFICATION-STRING`
+   / `APP-CONTENT-ENCRYPTED: 1` headers (confirmed present, different
+   values than the request's own), matching what `getSignatureParam`
+   expects to derive key/iv from for decrypting a *response*. Tried
+   decrypting with `key=MD5(respSendDate+"1"+respContentType)`,
+   `iv=MD5(respSendDate)` exactly per that function - **padding is
+   invalid, decrypted bytes are pure random-looking garbage**, not close
+   to valid JSON at all. So either:
+   - `getSignatureParam` is called with something other than the raw
+     axios response object's `.headers` (worth re-reading the exact call
+     site more carefully - the snippet captured was
+     `{encryptKey:i,iv:s}=getSignatureParam(a)` where `a` is the response
+     interceptor's parameter, but there could be a different response
+     interceptor for **error** responses specifically that this session
+     never located/read - only the success-path interceptor snippet was
+     found),
+   - or a 404 status specifically skips/uses a different decrypt path
+     than 200 responses do,
+   - or the AES128decrypt's extra hex→raw-bytes→base64-string step (see
+     the function listing above) matters in some non-obvious way that a
+     straight `bytes.fromhex()` in Python doesn't replicate correctly
+     (should be a no-op round-trip, but worth double-checking against a
+     real CryptoJS.AES.decrypt() call if stuck).
+   **The cleanest way to resolve this for certain: capture one real
+   request+response pair from the live app** (a **fresh, non-cached**
+   `/oauth/token` call - this session's mitmproxy capture only ever saw
+   the WebView's initial page load, never a live login attempt, because
+   the phone kept reusing an already-authenticated session) and diff it
+   character-by-character against what this script produces/expects.
+   That would settle every remaining unknown (response decrypt key/iv,
+   and whether deviceType/deviceId/loginType/countryCode need real values)
+   in minutes instead of more guessing.
+
+**Script state:** `tools/try_il_login.py` is genuinely useful as-is - the
+request-side encryption+signing is proven correct against the real
+server. Re-run it any time with `il_test.env` (gitignored, not committed -
+recreate it locally with `IL_USER`/`IL_PASSWORD` before running) to
+continue from exactly this point.
+
 ## What real reverse-engineering work remains
 
 To make `bridge/vehicles/mg.py` (or a new adapter) work against this
