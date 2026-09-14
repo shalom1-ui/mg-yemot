@@ -84,6 +84,109 @@ a generic/opaque error rather than a real auth failure.
   `Blade-Auth: bearer <token>` (a Spring-Cloud-Gateway "Blade" auth
   scheme token, presumably returned by the `/oauth/token` call).
 
+## UPDATE 2026-09-14 (same day, continued): full algorithm found
+
+Kept reading the JS bundle and found the **complete, concrete signing +
+encryption algorithm** - no secret server-side key involved anywhere,
+everything is derivable client-side from a timestamp the client itself
+picks. Verbatim source (`g()` is the request-interceptor's signing
+function, called as `g(request, appSendDate)`; `a`/`r` are outer-scope
+vars it sets as a side effect, later reused by `getEncryptBody`):
+
+```js
+function g(A, b) {
+  let C = A.url.substr(substr);              // substr is the string "36" = length of
+                                               // "https://opt-svc.soimt.com/api.app/v1" -
+                                               // so C = the relative path, e.g. "/oauth/token"
+  let k = "";
+  if (A.params) { k = addParamsToUrl(C, A.params); C = C + k.search; }  // GET query string appended
+  const S = tenantId, E = "app";              // S = "459771" (default), E = literal "app"
+  let N = A.headers["ORIGINAL-CONTENT-TYPE"];
+  let w = A.headers["Blade-Auth"] || "";      // "" for unauthenticated calls (e.g. /oauth/token)
+  let P = hex_md5(`${C}${S}${w}${E}`);        // P = MD5(path + tenantId + bladeAuth + "app")
+  let m = `${b}1${N}`;                        // m = appSendDate + "1" + originalContentType
+  a = hex_md5(P + m);                         // AES key  (hex-encoded, parsed as 16 raw bytes)
+  r = hex_md5(b);                             // AES IV   (hex-encoded, parsed as 16 raw bytes)
+  let O = hex_md5(a + b);                     // HMAC key = MD5(aesKey + appSendDate)
+  let D = getEncryptBody(a, r, A.data, A.headers);  // D = AES-encrypted body (hex string)
+  let J = `${C}${S}${w}${E}${b}1${N}${D}`;    // signing base string
+  return hmacSHA256(J, O);                    // -> APP-VERIFICATION-STRING header value
+}
+
+function AES128Encrypt(keyHex, ivHex, plaintext) {
+  // CryptoJS AES-128-CBC, PKCS7 padding. .ciphertext.toString() defaults to
+  // hex encoding in CryptoJS - the wire body is this hex string, raw (no
+  // base64, no JSON wrapper).
+}
+
+function getEncryptBody(key, iv, data, headers) {
+  // if ORIGINAL-CONTENT-TYPE is "application/x-www-form-urlencoded":
+  //   AES128Encrypt(key, iv, <the already-urlencoded body string>)
+  // else:
+  //   AES128Encrypt(key, iv, JSON.stringify(data))
+}
+```
+
+Call order per request (in the axios request interceptor, in this order):
+1. Resolve `s` (full URL) and `tenantId`: from cached `getLocationStorage("config")`
+   if present (`conf.tspRootUrl + url`, `conf.tenantId`), else the hardcoded
+   bootstrap default `"https://opt-svc.soimt.com/api.app/v1" + url` with
+   `tenantId="459771"`.
+2. Build the headers object (varies slightly per endpoint - see the three
+   branches already documented above: `/oauth/token` gets
+   `Authorization: Basic c3dvcmQ6c3dvcmRfc2VjcmV0`; `/vehicle/list` (and
+   presumably other authenticated calls) gets
+   `Blade-Auth: bearer <token>`; everything else gets neither). All
+   branches include `APP-CONTENT-ENCRYPTED: 1`, `tenant-id`,
+   `ORIGINAL-CONTENT-TYPE`, `User-Type: app`, `APP-LANGUAGE-TYPE`,
+   `Global-APP: 1`.
+3. Set the request body (`e.data`) to the form-urlencoded or JSON string
+   (still **plaintext** at this point).
+4. `n` = current timestamp in epoch **milliseconds**, as a string (this is
+   the `app-send-date` value the client picks - just `Date.now()`
+   basically. Confirmed format from an earlier captured real header:
+   `'app-send-date': '1789330124576'`, a 13-digit ms epoch).
+5. `e.headers["APP-SEND-DATE"] = n`
+6. `e.headers["APP-VERIFICATION-STRING"] = g(e, n)` - **this call has the
+   side effect of computing and setting the module-level `a` (AES key)
+   and `r` (AES IV)** that step 7 then reuses.
+7. `e.data = getEncryptBody(a, r, e.data, e.headers)` - replaces the
+   plaintext body with the AES-encrypted hex string. **This is the actual
+   wire body sent.**
+8. A few more static headers get added after this
+   (`Cross-Region-Binding`, `APP-Brand: MG`, `APP-Version`) - not
+   security-relevant, just app metadata; safe to hardcode/omit and see
+   if the server cares.
+
+Response decryption (separate `getSignatureParam` function, simpler -
+reuses the same `app-send-date`/`original-content-type` the request was
+sent with, presumably echoed back or just kept from the request context):
+```js
+function getSignatureParam({headers: e}) {
+  let r = `${e["app-send-date"]}1${e["original-content-type"]}`;
+  return { encryptKey: hex_md5(r), iv: hex_md5(e["app-send-date"]) };
+}
+```
+then `AES128decrypt(encryptKey, iv, <response body hex>)` - note
+`AES128decrypt` first does `CryptoJS.enc.Base64.stringify(CryptoJS.enc.Hex.parse(responseHex))`
+before decrypting - i.e. **the response body hex bytes get re-encoded as
+base64 text before being handed to CryptoJS.AES.decrypt** (CryptoJS's
+`.decrypt(base64OrCiphertextParams, key, {iv,...})` form expects either a
+CipherParams object or a base64 string when given a plain string - this
+re-encoding step is just adapting hex-received bytes into the format
+CryptoJS.AES.decrypt expects, not a second layer of encoding on the wire).
+
+**This means a Python implementation is now fully specified - no unknowns
+left except things a working request could confirm/refute:**
+- `hex_md5` = standard MD5, lowercase hex digest (near-certain, but not
+  independently confirmed against a real captured request/response pair
+  yet - the friend's phone never sent a fresh /oauth/token call through
+  the proxy during this session, it reused a cached session).
+- Python equivalent: `hashlib.md5(s.encode()).hexdigest()`,
+  `hmac.new(bytes.fromhex(O), J.encode(), hashlib.sha256).hexdigest()`,
+  and `Crypto.Cipher.AES` (pycryptodome) in CBC mode with PKCS7 padding
+  for the AES128Encrypt/decrypt pair (raw hex key/iv via `bytes.fromhex`).
+
 ## What real reverse-engineering work remains
 
 To make `bridge/vehicles/mg.py` (or a new adapter) work against this
