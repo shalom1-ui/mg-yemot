@@ -213,6 +213,23 @@ def yemot_webhook(path_token=None):
     )
 
 
+@app.route("/yemot-test", methods=["GET", "POST"])
+def yemot_test():
+    # TEMPORARY diagnostic route (2026-09-15): always plays a known Yemot
+    # SYSTEM message (M1000, pre-recorded by Yemot itself) instead of our
+    # own custom Hebrew TTS text, to isolate whether "read=t-<hebrew text>"
+    # TTS rendering specifically is silent/broken on this account, vs. the
+    # whole protocol round-trip being broken. Point a spare extension's
+    # api_link at this route for one test call, then remove this route
+    # once the real cause is found - not meant to stay in the codebase.
+    log.info("yemot-test hit: %s", request.args.to_dict() | request.form.to_dict())
+    return yemot_response(combine(id_list_message_raw("M1000"), hangup()))
+
+
+def id_list_message_raw(system_message_id: str) -> str:
+    return f"id_list_message={system_message_id}"
+
+
 @app.route("/health")
 def health():
     info = {"ok": True, "vehicles": list(adapters)}
