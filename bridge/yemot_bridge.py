@@ -136,10 +136,17 @@ def touch_call(call_id: str):
 app = Flask(__name__)
 
 @app.route("/yemot", methods=["GET", "POST"])
-def yemot_webhook():
+@app.route("/yemot/<path_token>", methods=["GET", "POST"])
+def yemot_webhook(path_token=None):
     params = {**request.args.to_dict(), **request.form.to_dict()}
 
-    if YEMOT_TOKEN and params.get("token") != YEMOT_TOKEN:
+    # The token lives in the URL PATH (/yemot/<token>), not a query string
+    # param - Yemot's api_link feature appends its own params with a
+    # second "?" instead of "&" when the configured URL already contains a
+    # "?", which corrupts a "?token=..." query param beyond recognition.
+    # A path segment is untouched by that, since Yemot only ever appends
+    # its own query string after whatever URL you configured.
+    if YEMOT_TOKEN and path_token != YEMOT_TOKEN:
         log.warning("Rejected request with bad/missing token")
         return yemot_response(combine(id_list_message("אין הרשאה."), hangup()))
 
