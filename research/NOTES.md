@@ -249,6 +249,97 @@ iterated live off real error responses - this is no longer theoretical:
    and whether deviceType/deviceId/loginType/countryCode need real values)
    in minutes instead of more guessing.
 
+## UPDATE 2026-09-14 (continued further): field-guess sweep inconclusive, static analysis exhausted for now
+
+- Tried 3 plausible `deviceType`/`loginType`/`countryCode` combinations
+  (`(0,1,"")`, `(1,1,"")`, `(0,1,"IL")`) against the real server -
+  **identical HTTP 404, identical 224-byte response every time.** This
+  strongly suggests the 404 is NOT caused by these guessed field values
+  at all (they'd very likely change *something* - even a different error
+  message length - if they mattered) - more likely a route/infrastructure
+  -level 404 (e.g. Spring Cloud Gateway "no matching route", independent
+  of request body content) than a business-logic rejection.
+- Re-read the response interceptor code again carefully: confirmed the
+  `getSignatureParam`/`AES128decrypt(i,s,a.data)` call is the ONLY
+  decryption logic in the file, inside `service.interceptors.response.use(...)`,
+  and IS reached even for `a.status != 200` (the axios instance sets a
+  custom `validateStatus`, so non-2xx responses go through the *fulfilled*
+  handler, not a separate rejection handler) - so decrypting the 404 body
+  the way the script already tries is the architecturally correct
+  approach per the code; the bug (if this key/iv formula is even right)
+  must be something more subtle, not "wrong code path entirely".
+- Deliberately did **not** keep expanding the automated combination
+  sweep - kept it to 3 tries specifically to avoid risking a real
+  account lockout from repeated automated login attempts against MG's
+  production servers, and the harness's own safety classifier then
+  independently blocked a further (lower-risk, unauthenticated route-
+  probing) sweep as resembling third-party service probing/attack
+  traffic - a signal worth respecting rather than routing around.
+- **Conclusion: static analysis + safe live-testing is genuinely
+  exhausted for now.** The one thing that would unstick this in minutes
+  instead of more guessing is a **real captured request+response pair**
+  from an actual fresh (non-cached) login in the live app - see the "How
+  to resume" note in the project memory / earlier in this file for the
+  mitmproxy capture setup that already worked once this session (phone +
+  a second PC network adapter on an independent hotspot, bypassing
+  NetFree). Recommend not resuming this task again without that capture
+  in hand, or without a specific new static-analysis idea worth trying
+  (e.g. actually beautify+fully read the whole `index.cc83b2fd.js` bundle
+  file rather than grep-sampling it, in case a config/discovery endpoint
+  like `/config/app` needs to be called *before* `/oauth/token` and
+  changes the base URL/tenant used for the login call itself - this was
+  flagged as untested "worth fetching for real" in the very first update
+  above and never actually followed up on).
+
+## UPDATE 2026-09-14 (BREAKTHROUGH): the real API host, found via /config/app
+
+Actually called `/config/app` (low-risk - not a login attempt, no account
+lockout concern) the way the real app does before ever calling
+`/oauth/token`, with the two required query params it turned out to need
+(`packageName=com.mgismart.israel`, `countryCode=IL` - discovered one at a
+time from the server's own "missing parameter" error messages, which our
+response-decryption code decrypted **perfectly** - confirming the whole
+AES+HMAC scheme in this file is correct). Full decrypted response:
+
+```json
+{"code":0,"success":true,"data":{
+  "tspId":"ISR",
+  "tspRootUrl":"https://gateway-mg-il.soimt.com/api.app/v1",
+  "tenantId":"459771",
+  "userType":"app",
+  "authorization":"Basic c3dvcmQ6c3dvcmRfc2VjcmV0",
+  "nonGlobalAppId":4,
+  "countryCodeA3":"ISR","countryCodeA2":"IL",
+  "serviceSubscriptionUrl":"",
+  "onlineImageUrl":"https://s3.ap-southeast-1.amazonaws.com/tpage.soimt.com/APP/"
+},"msg":"success"}
+```
+
+**This is THE answer.** `opt-svc.soimt.com` is only a bootstrap/discovery
+host used for this one `/config/app` call - the REAL API root for
+everything else (login, vehicle list/status/control) is:
+
+  **`https://gateway-mg-il.soimt.com/api.app/v1`**
+
+This follows the **exact same naming pattern** as the hosts the
+open-source `saic-python-mqtt-gateway`/`saic_ismart_client_ng` library
+already supports (`gateway-mg-eu.soimt.com`, `gateway-mg-au.soimt.com`,
+`gateway-mg-tr.soimt.com`) - Israel was simply never added to the
+community's list, not a fundamentally different system. This also
+confirms the `Authorization: Basic c3dvcmQ6c3dvcmRfc2VjcmV0` credential
+guessed earlier from the JS was exactly right, and tenantId `459771` was
+never the issue.
+
+**Immediate implication: `gateway-mg-il.soimt.com` may use the OLDER,
+unencrypted protocol** (matching eu/au/tr), meaning the *existing*,
+*unmodified* open-source library might just work against it directly -
+no custom AES/HMAC code needed at all for the actual login/vehicle calls,
+only `SAIC_REST_URI=https://gateway-mg-il.soimt.com/api.app/v1/` (and
+`SAIC_REGION` can stay whatever, it's cosmetic once REST_URI is set
+explicitly, as already established earlier this session). **This is the
+very next thing to try in Render** - see the main mg-yemot-car-control
+memory / continue from here.
+
 **Script state:** `tools/try_il_login.py` is genuinely useful as-is - the
 request-side encryption+signing is proven correct against the real
 server. Re-run it any time with `il_test.env` (gitignored, not committed -
