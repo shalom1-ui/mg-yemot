@@ -154,6 +154,7 @@ def yemot_response(body: str) -> Response:
 # ---------------------------------------------------------------------------
 authenticated_calls = {}  # call_id -> last_seen_timestamp
 call_vehicle = {}         # call_id -> brand_id, once chosen for this call
+call_round = {}           # call_id -> int, see next_choice_var() below
 CALL_TTL_SECONDS = 30 * 60
 
 def touch_call(call_id: str):
@@ -163,6 +164,35 @@ def touch_call(call_id: str):
     for cid in stale:
         authenticated_calls.pop(cid, None)
         call_vehicle.pop(cid, None)
+        call_round.pop(cid, None)
+
+def next_choice_var(call_id: str) -> str:
+    """
+    A fresh, never-before-seen varname ("car_choice_0", "car_choice_1", ...)
+    for each round of the action menu within one call.
+
+    Bug found 2026-09-15: the action menu re-reads the SAME varname
+    ("car_choice") in a loop for as long as the call lasts. Even with
+    read='s re_enter_if_exists option set to "yes", live testing showed
+    every key press after the first kept re-running the FIRST action ever
+    chosen in the call (e.g. every press "unlocked" because that's what
+    was pressed first) - Yemot appears to keep reusing the first value it
+    ever collected for a given varname within a call regardless of that
+    flag. Using a brand-new varname every round sidesteps the ambiguity
+    entirely: Yemot cannot have a stale cached value for a name it has
+    never seen before.
+    """
+    n = call_round.get(call_id, 0)
+    call_round[call_id] = n + 1
+    return f"car_choice_{n}"
+
+def first_menu_response(call_id: str) -> str:
+    """The response for a just-authenticated call: the action menu directly
+    (single brand) or the vehicle-picker (multiple brands)."""
+    if SINGLE_BRAND:
+        call_vehicle[call_id] = SINGLE_BRAND
+        return read_digits(adapters[SINGLE_BRAND].menu_prompt(), next_choice_var(call_id), 1)
+    return read_digits(vehicle_select_prompt(), "car_select", 1)
 
 # ---------------------------------------------------------------------------
 # Main webhook
@@ -194,13 +224,24 @@ def yemot_webhook(path_token=None):
             id_list_message_hangup("מצטערים, מספר זה אינו מורשה להשתמש בשירות.")
         )
 
-    # Step 1: PIN entry (4 digits, "car_pin").
-    # NOTE: we branch on server-side call state (authenticated_calls), NOT on
-    # "is car_pin present in params" - Yemot may keep echoing back earlier
-    # collected fields (car_pin included) on every later hit of the same
-    # call, and branching on their mere presence would re-trigger this block
-    # forever, trapping the caller in a loop that never reaches the menu.
+    # Step 1: PIN entry (4 digits, "car_pin") - SKIPPED for a phone number
+    # already on YEMOT_ALLOWED_NUMBERS. That allow-list is itself already a
+    # per-number authentication (caller ID isn't something a normal caller
+    # can spoof on the phone network), so asking a known, trusted number to
+    # also type a PIN is redundant friction. The PIN remains the ONLY
+    # authentication when YEMOT_ALLOWED_NUMBERS isn't configured at all
+    # (e.g. a future deployment open to any caller who self-identifies with
+    # a PIN).
+    # NOTE: when the PIN path IS used, we branch on server-side call state
+    # (authenticated_calls), NOT on "is car_pin present in params" - Yemot
+    # may keep echoing back earlier collected fields (car_pin included) on
+    # every later hit of the same call, and branching on their mere
+    # presence would re-trigger this block forever, trapping the caller in
+    # a loop that never reaches the menu.
     if call_id not in authenticated_calls:
+        if ALLOWED_NUMBERS:
+            touch_call(call_id)
+            return yemot_response(first_menu_response(call_id))
         if "car_pin" not in params:
             # very first hit of the call - nothing collected yet.
             return yemot_response(read_digits("נא להקליד קוד סודי בן ארבע ספרות", "car_pin", 4))
@@ -208,10 +249,7 @@ def yemot_webhook(path_token=None):
             log.warning("Wrong PIN attempt from %s", phone)
             return yemot_response(id_list_message_hangup("קוד שגוי. השיחה תנותק."))
         touch_call(call_id)
-        if SINGLE_BRAND:
-            call_vehicle[call_id] = SINGLE_BRAND
-            return yemot_response(read_digits(adapters[SINGLE_BRAND].menu_prompt(), "car_choice", 1))
-        return yemot_response(read_digits(vehicle_select_prompt(), "car_select", 1))
+        return yemot_response(first_menu_response(call_id))
 
     touch_call(call_id)
 
@@ -225,14 +263,22 @@ def yemot_webhook(path_token=None):
         if not chosen:
             return yemot_response(read_digits(vehicle_select_prompt(), "car_select", 1, "בחירה לא תקינה."))
         call_vehicle[call_id] = chosen
-        return yemot_response(read_digits(adapters[chosen].menu_prompt(), "car_choice", 1))
+        return yemot_response(read_digits(adapters[chosen].menu_prompt(), next_choice_var(call_id), 1))
 
     # Step 3: action choice within the already-chosen vehicle
     adapter = adapters[call_vehicle[call_id]]
-    choice = params.get("car_choice", "")
+    # the varname we most recently prompted with is call_round[call_id] - 1
+    # (next_choice_var() already advanced the counter for next time)
+    choice = params.get(f"car_choice_{call_round.get(call_id, 1) - 1}", "")
 
     if choice == "*":
         return yemot_response(id_list_message_hangup("להתראות."))
+
+    if choice == "0":
+        # replay the menu, no "invalid choice" framing - this is a
+        # deliberate "hear the options again / do another action" key,
+        # not a mistake.
+        return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), 1))
 
     try:
         result_text = adapter.handle_choice(choice)
@@ -241,9 +287,9 @@ def yemot_webhook(path_token=None):
         result_text = "אירעה שגיאה בביצוע הפעולה."
 
     if result_text is None:
-        return yemot_response(read_digits(adapter.menu_prompt(), "car_choice", 1, "בחירה לא תקינה."))
+        return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), 1, "בחירה לא תקינה."))
 
-    return yemot_response(read_digits(adapter.menu_prompt(), "car_choice", 1, result_text))
+    return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), 1, result_text))
 
 
 @app.route("/yemot-test", methods=["GET", "POST"])
