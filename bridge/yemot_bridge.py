@@ -102,9 +102,13 @@ _brand_by_index = list(adapters.keys())
 # Yemot protocol helpers
 # ---------------------------------------------------------------------------
 def clean(text: str) -> str:
-    # Strip characters that would break the "key=value&key=value" style
-    # response Yemot expects.
-    return re.sub(r"[&=\n\r]", " ", text)
+    # Strip characters that are reserved/structural in Yemot's own mini-
+    # language, not just our own "key=value&key=value" framing: "." is used
+    # as a command separator (e.g. "id_list_message=t-<text>.g-hangup"), so
+    # a period *inside* our own message text can get misparsed as ending
+    # the text early. Matches the working reference's sanitizeForYemot()
+    # exactly ([.\-"'&|]) plus our own & = \n \r.
+    return re.sub(r"[.\-\"'&|=\n\r]", " ", text)
 
 def id_list_message_hangup(text: str) -> str:
     """Play text, then hang up - one combined command (`.g-hangup` suffix)."""
