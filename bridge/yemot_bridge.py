@@ -133,9 +133,16 @@ def read_digits(prompt: str, varname: str, digits: int, result_text: str = "") -
     "No" for typing_playback_mode = don't read back each digit as typed
     (relevant for PINs). block_asterisk_key="no" = "*" still comes through
     as a value (used for the "hang up" menu option).
+    re_enter_if_exists="yes" is required: this same varname (e.g.
+    "car_choice") gets read over and over in a loop for as long as the
+    call lasts, and with "no" Yemot silently reuses the value from the
+    FIRST time it was ever collected in this call instead of prompting
+    for/reading a fresh digit - every subsequent key press was being
+    ignored in favor of the original one (2026-09-15 bug: every key
+    acted like the very first choice made in the call).
     """
     text = f"{result_text} {prompt}".strip() if result_text else prompt
-    ops = ["no", str(digits), str(digits), "7", "No", "no", "no", "", "", "", "", "", ""]
+    ops = ["yes", str(digits), str(digits), "7", "No", "no", "no", "", "", "", "", "", ""]
     return f"read=t-{clean(text)}={varname},{','.join(ops)}"
 
 def yemot_response(body: str) -> Response:
