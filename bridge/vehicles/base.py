@@ -14,13 +14,22 @@ from abc import ABC, abstractmethod
 
 
 class VehicleAdapter(ABC):
-    """One instance per configured vehicle brand."""
+    """One instance per (user, brand) - constructed lazily the first time a
+    given caller picks this brand, and cached for reuse across the rest of
+    the call and any later calls from the same user."""
 
     #: short id used in VEHICLE_BRAND / VEHICLES env vars, e.g. "mg", "maxus"
     brand_id: str = ""
 
     #: human-readable name announced to the caller, e.g. "אם. ג'י", "מקסוס"
     display_name: str = ""
+
+    def __init__(self, user) -> None:
+        """`user` is a store.User record - this brand's account, phone/PIN
+        and (for brands that need it) car-cloud credentials all live on it.
+        Stub brands that aren't wired up to a real account yet (e.g. Maxus
+        today) may ignore it."""
+        self.user = user
 
     @abstractmethod
     def menu_prompt(self) -> str:

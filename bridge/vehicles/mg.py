@@ -1,19 +1,24 @@
 """
-MG adapter - talks to the SAIC iSMART MQTT gateway
-(https://github.com/SAIC-iSmart-API/saic-python-mqtt-gateway), which in turn
-talks to MG's cloud (SAIC iSMART). This is the original, working integration
-that used to live directly inside yemot_bridge.py.
+MG adapter - talks directly to MG's cloud (SAIC iSMART) via
+saic_ismart_client_ng.SaicApi, on demand, per phone command. No MQTT, no
+per-account gateway process: see saic_client.py for why - in short, the
+upstream saic-python-mqtt-gateway project's own car-control calls are
+one-line async SaicApi calls, so a live broker connection isn't needed for
+a bridge that only issues a command when a caller presses a key.
 
-MQTT topic names are verified against src/mqtt_topics.py in the gateway repo.
+One VehicleAdapter instance per (user, brand) - see base.py - so self.user
+is this call's already-identified store.User record (their own MG
+credentials, saic_base_uri/region/tenant_id, and cached VIN).
 """
 
-import os
-import time
-import threading
+from __future__ import annotations
+
 import logging
+import threading
+import time
 
-import paho.mqtt.client as mqtt
-
+import store
+import saic_client
 from .base import VehicleAdapter
 
 log = logging.getLogger("yemot-bridge.mg")
@@ -23,101 +28,63 @@ class MgAdapter(VehicleAdapter):
     brand_id = "mg"
     display_name = "אם. ג'י"
 
-    def __init__(self):
-        self.mqtt_host = os.environ.get("MQTT_HOST", "127.0.0.1")
-        self.mqtt_port = int(os.environ.get("MQTT_PORT", "1883"))
-
-        account = os.environ.get("MG_ACCOUNT", "")
-        # MG_VEHICLE_ID must be the car's VIN, exactly as printed in the
-        # mg-gateway startup logs - the gateway's own topic scheme is
-        # saic/<user>/vehicles/<VIN>.
-        vehicle_id = os.environ.get("MG_VEHICLE_ID", "")
-        topic_root = os.environ.get("MQTT_TOPIC", "saic")
-        self.base_topic = f"{topic_root}/{account}/vehicles/{vehicle_id}"
-
-        self.status_cache = {}
-        self._client = mqtt.Client()
-        self._client.on_connect = self._on_connect
-        self._client.on_message = self._on_message
-        threading.Thread(target=self._start_mqtt, daemon=True).start()
-
-    # -- MQTT plumbing -----------------------------------------------------
-    def _on_connect(self, client, userdata, flags, rc):
-        log.info("Connected to MQTT broker (rc=%s), subscribing to %s/#", rc, self.base_topic)
-        client.subscribe(f"{self.base_topic}/#")
-
-    def _on_message(self, client, userdata, msg):
-        key = msg.topic[len(self.base_topic) + 1:]
-        try:
-            self.status_cache[key] = msg.payload.decode("utf-8", errors="replace")
-        except Exception:
-            self.status_cache[key] = str(msg.payload)
-
-    def _start_mqtt(self):
-        while True:
-            try:
-                self._client.connect(self.mqtt_host, self.mqtt_port, keepalive=30)
-                self._client.loop_forever()
-            except Exception as e:
-                log.warning("MQTT connection failed (%s), retrying in 5s", e)
-                time.sleep(5)
-
-    def _publish(self, subtopic: str, payload: str):
-        topic = f"{self.base_topic}/{subtopic}"
-        log.info("Publishing %s -> %s", topic, payload)
-        self._client.publish(topic, payload, qos=1, retain=False)
+    @property
+    def vin(self) -> str:
+        if not self.user.vin:
+            # first-ever command for this user in this process: discover
+            # and cache the VIN via a real vehicle_list() call.
+            resp = saic_client.call(self.user, lambda api: api.vehicle_list())
+            vin = resp.vinList[0].vin
+            store.set_vin(self.user.id, vin)
+            self.user.vin = vin
+        return self.user.vin
 
     # -- actions -------------------------------------------------------
     def _action_ac_on(self):
-        self._publish("climate/remoteClimateState/set", "on")
+        saic_client.call(self.user, lambda api: api.start_ac(self.vin))
         return "הפקודה להדלקת המזגן נשלחה, הרכב אמור להגיב תוך דקה עד שתיים"
 
     def _action_ac_off(self):
-        self._publish("climate/remoteClimateState/set", "off")
+        saic_client.call(self.user, lambda api: api.stop_ac(self.vin))
         return "הפקודה לכיבוי המזגן נשלחה"
 
     def _action_lock(self):
-        self._publish("doors/locked/set", "true")
+        saic_client.call(self.user, lambda api: api.lock_vehicle(self.vin))
         return "הפקודה לנעילת הדלתות נשלחה"
 
     def _action_unlock(self):
-        self._publish("doors/locked/set", "false")
+        saic_client.call(self.user, lambda api: api.unlock_vehicle(self.vin))
         return "הפקודה לפתיחת הדלתות נשלחה"
 
     def _action_find_car(self):
-        self._publish("location/findMyCar/set", "activate")
+        saic_client.call(self.user, lambda api: api.control_find_my_car(self.vin))
 
         def stop_later():
             time.sleep(20)
-            self._publish("location/findMyCar/set", "stop")
+            try:
+                saic_client.call(
+                    self.user, lambda api: api.control_find_my_car(self.vin, should_stop=True)
+                )
+            except Exception:
+                log.exception("Failed to auto-stop find-my-car for user %s", self.user.id)
 
         threading.Thread(target=stop_later, daemon=True).start()
         return "הרכב יצפצף ויהבהב באורות למשך כעשרים שניות"
 
     def _action_status(self):
-        soc = self.status_cache.get("drivetrain/soc")
-        fuel = self.status_cache.get("drivetrain/fossilFuel/percentage")  # relevant for the S9 PHEV
-        locked = self.status_cache.get("doors/locked")
-        lat = self.status_cache.get("location/latitude")
-        lon = self.status_cache.get("location/longitude")
+        status = saic_client.call(self.user, lambda api: api.get_vehicle_status(self.vin))
+        basic = status.basicVehicleStatus
 
         parts = []
-        if soc:
-            parts.append(f"רמת הסוללה {soc} אחוז")
-        else:
-            parts.append("אין עדיין נתון על רמת הסוללה")
-
-        if fuel:
-            parts.append(f"רמת הדלק {fuel} אחוז")
-
-        if locked is not None:
-            locked_txt = "נעולה" if locked.lower() in ("true", "1", "locked") else "לא נעולה"
+        if basic and basic.fuelLevelPrc is not None:
+            parts.append(f"רמת הדלק {basic.fuelLevelPrc} אחוז")
+        if basic and basic.lockStatus is not None:
+            locked_txt = "נעולה" if basic.lockStatus == 1 else "לא נעולה"
             parts.append(f"הרכב {locked_txt}")
-
-        if lat and lon:
+        if status.gpsPosition is not None:
             parts.append("יש נתון מיקום עדכני לרכב")
-        else:
-            parts.append("אין עדיין נתון מיקום")
+        if not parts:
+            parts.append("אין כרגע נתון זמין על הרכב")
 
         return ", ".join(parts)
 
@@ -149,4 +116,8 @@ class MgAdapter(VehicleAdapter):
         action = self._MENU.get(choice)
         if not action:
             return None
-        return action(self)
+        try:
+            return action(self)
+        except Exception:
+            log.exception("MG action %r failed for user %s", choice, self.user.id)
+            return "אירעה שגיאה בתקשורת עם הענן של MG, נסו שוב בעוד רגע"

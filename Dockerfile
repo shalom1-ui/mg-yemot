@@ -38,20 +38,23 @@ ENV GATEWAY_VENV=/usr/src/gateway/.venv
 COPY --from=gw-builder /usr/src/app/.venv ${GATEWAY_VENV}
 COPY --from=gw-builder /usr/src/app/src/ /usr/src/gateway/
 COPY --from=gw-builder /usr/src/app/examples/ /usr/src/gateway/
-# Our own bridge needs to talk MQTT too - add it to the same venv so both
-# processes share one consistent, known-good Python environment.
+# Our own bridge shares this same venv so both processes use one
+# consistent, known-good Python environment - and, since 2026-09-15, so it
+# can import saic_ismart_client_ng directly (already installed here via
+# Poetry above) for on-demand, per-user car commands - see
+# bridge/saic_client.py. It no longer talks MQTT at all (dropped
+# paho-mqtt): the gateway process itself still uses MQTT/mosquitto for its
+# own always-on polling of the primary account, but the bridge issues
+# commands straight to MG's cloud now, one call at a time, which is what
+# makes serving more than one user's account practical.
 # NOTE: recent Poetry versions no longer install pip into the venvs they
 # create, so `${GATEWAY_VENV}/bin/pip` doesn't exist yet at this point
 # (this broke the first real Render build with "exit code: 127" - command
 # not found). `ensurepip` is part of the Python standard library itself and
 # works fully offline, so it's a reliable way to bootstrap pip into this
 # venv before using it.
-# paho-mqtt is pinned to 1.6.1 (matching bridge/requirements.txt) - without
-# a pin this used to silently install the latest paho-mqtt 2.x, which
-# changed its Client() API/defaults and is suspected of causing an MQTT
-# "protocol error" reconnect loop seen in production logs.
 RUN ${GATEWAY_VENV}/bin/python -m ensurepip --upgrade \
-    && ${GATEWAY_VENV}/bin/python -m pip install --no-cache-dir flask "paho-mqtt==1.6.1"
+    && ${GATEWAY_VENV}/bin/python -m pip install --no-cache-dir flask cryptography
 
 # ---- Yemot bridge ----
 COPY bridge/yemot_bridge.py /usr/src/bridge/yemot_bridge.py

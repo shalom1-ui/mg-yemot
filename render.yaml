@@ -6,17 +6,27 @@ services:
     plan: starter        # paid, always-on - the free plan sleeps after 15 min
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
+    disk:
+      # Persistent storage for the multi-tenant user database (store.py) -
+      # without this, SQLite's file would be wiped on every redeploy since
+      # Render's own container filesystem is otherwise ephemeral. Far
+      # cheaper than a separate managed Postgres for a dataset this small.
+      name: mg-yemot-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
-      - key: VEHICLES
-        value: mg,maxus
+      # The original single MG account, still supported with zero
+      # migration as a fallback "user" built from these same env vars -
+      # see yemot_bridge.py's _legacy_user. New people are added via
+      # POST /signup/<ADMIN_TOKEN> into the database instead.
       - key: SAIC_USER
         sync: false
       - key: SAIC_PASSWORD
         sync: false
       - key: SAIC_REGION
-        value: eu
-      - key: MG_ACCOUNT
-        sync: false
+        sync: false   # "tr" for an Israeli account - see research/NOTES.md
+      - key: SAIC_REST_URI
+        sync: false   # https://gateway-mg-il.soimt.com/api.app/v1/ for IL
       - key: MG_VEHICLE_ID
         sync: false
       - key: YEMOT_TOKEN
@@ -25,3 +35,8 @@ services:
         sync: false
       - key: YEMOT_ALLOWED_NUMBERS
         sync: false
+      # Multi-tenant additions (2026-09-15):
+      - key: ENCRYPTION_KEY
+        sync: false   # generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: ADMIN_TOKEN
+        sync: false   # generate with: openssl rand -hex 16 - gates POST /signup/<token>
