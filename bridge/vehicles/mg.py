@@ -42,11 +42,32 @@ class MgAdapter(VehicleAdapter):
     # -- actions -------------------------------------------------------
     def _action_ac_on(self):
         saic_client.call(self.user, lambda api: api.start_ac(self.vin))
+        # Live testing found that a command right after AC-on (e.g. unlock)
+        # can silently fail to reach the car, while the same sequence works
+        # fine in MG's own smartphone app - the app's UI implicitly paces
+        # the user (spinner/disabled button) while our IVR menu doesn't.
+        # This deliberate pause approximates that pacing - AC-on specifically
+        # is the slow one to settle server-side; AC-off/lock/unlock aren't.
+        time.sleep(5)
         return "הפקודה להדלקת המזגן נשלחה, הרכב אמור להגיב תוך דקה עד שתיים"
 
     def _action_ac_off(self):
         saic_client.call(self.user, lambda api: api.stop_ac(self.vin))
         return "הפקודה לכיבוי המזגן נשלחה"
+
+    def _action_seat_heat_on(self):
+        saic_client.call(self.user, lambda api: api.control_heated_seats(
+            self.vin, left_side_level=3, right_side_level=3))
+        return "הפקודה להדלקת חימום מושבים נשלחה"
+
+    def _action_seat_heat_off(self):
+        saic_client.call(self.user, lambda api: api.control_heated_seats(
+            self.vin, left_side_level=0, right_side_level=0))
+        return "הפקודה לכיבוי חימום מושבים נשלחה"
+
+    def _action_front_defrost(self):
+        saic_client.call(self.user, lambda api: api.start_front_defrost(self.vin))
+        return "הפקודה להפשרת השמשה הקדמית נשלחה"
 
     def _action_lock(self):
         saic_client.call(self.user, lambda api: api.lock_vehicle(self.vin))
@@ -95,6 +116,9 @@ class MgAdapter(VehicleAdapter):
         "4": _action_unlock,
         "5": _action_status,
         "6": _action_find_car,
+        "7": _action_seat_heat_on,
+        "8": _action_seat_heat_off,
+        "9": _action_front_defrost,
     }
 
     def menu_prompt(self) -> str:
@@ -109,6 +133,9 @@ class MgAdapter(VehicleAdapter):
             "לחץ ארבע לפתיחת דלתות, "
             "לחץ חמש לשמיעת סטטוס הרכב, "
             "לחץ שש לצפצוף ואיתור הרכב, "
+            "לחץ שבע להדלקת חימום מושבים, "
+            "לחץ שמונה לכיבוי חימום מושבים, "
+            "לחץ תשע להפשרת השמשה הקדמית, "
             "לחץ כוכבית לסיום"
         )
 
