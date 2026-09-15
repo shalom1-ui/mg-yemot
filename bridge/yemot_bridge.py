@@ -17,13 +17,19 @@ Flow:
      Each adapter turns the chosen digit into a real command to the car.
 
 NOTE ON PROTOCOL ACCURACY:
-  The exact Yemot response syntax below is based on community documentation
-  (the yemot-router2 / yemot-api open source projects), not a fetch of
-  Yemot's official developer PDF (that page blocked automated access).
-  Test carefully and check the "מדריך למתכנתים" inside your Yemot management
-  panel (הגדרות מתקדמות) if something doesn't behave as expected - the
-  parameter names below (ApiPhone, ApiCallId, read=...,varname, etc.) are the
-  most likely candidates but may need small adjustments.
+  Fixed 2026-09-15: the original syntax here (based on generic community
+  docs, never verified against a real call) was wrong in two ways that
+  real testing caught - `read=` needs an `=<varname>` (not `,<varname>`)
+  PLUS a full positional options list after it, and `id_list_message` +
+  hangup must be ONE combined command via a `.g-hangup` suffix (not a
+  separate `hangup=yes` field). Confirmed-correct format copied from
+  [[hapinkas-sheli-accounts-app]]'s `backend/src/services/yemot.js` (a
+  live, working Yemot API-module integration) - see `read_digits()` and
+  `id_list_message_hangup()` below for the exact reproduction. Before this
+  fix, every real call got the request through fine (Render logs showed
+  200 OK) but the caller heard nothing at all and the same URL got
+  re-hit every ~2-3s - Yemot was receiving 200 responses it couldn't
+  parse as valid protocol commands, not a connectivity problem.
 
 CONFIGURING WHICH BRANDS ARE ACTIVE:
   Set VEHICLES to a comma-separated list of brand ids, e.g. "mg" or
@@ -100,17 +106,32 @@ def clean(text: str) -> str:
     # response Yemot expects.
     return re.sub(r"[&=\n\r]", " ", text)
 
-def id_list_message(text: str) -> str:
-    return f"id_list_message=t-{clean(text)}."
+def id_list_message_hangup(text: str) -> str:
+    """Play text, then hang up - one combined command (`.g-hangup` suffix)."""
+    return f"id_list_message=t-{clean(text)}.g-hangup"
 
-def read_digits(prompt: str, varname: str) -> str:
-    return f"read=t-{clean(prompt)},{varname}"
+def read_digits(prompt: str, varname: str, digits: int, result_text: str = "") -> str:
+    """
+    Ask the caller to type an exact-length digit sequence (PIN, a menu
+    digit, ...) into `varname`. Optionally prefixes `result_text` (e.g.
+    "the AC command was sent.") before the prompt, since combining a
+    separate id_list_message + read= into one response was never verified
+    and turned out to be one of the things that was silently wrong - one
+    read= call, with any feedback folded into its own prompt text, is the
+    confirmed-working shape.
 
-def hangup() -> str:
-    return "hangup=yes"
-
-def combine(*parts: str) -> str:
-    return "&".join(p for p in parts if p)
+    Option order (verified against a live working integration):
+      valName, re_enter_if_exists, max_digits, min_digits, sec_wait,
+      typing_playback_mode, block_asterisk_key, block_zero_key,
+      replace_char, digits_allowed, amount_attempts, allow_empty,
+      empty_val, block_change_keyboard
+    "No" for typing_playback_mode = don't read back each digit as typed
+    (relevant for PINs). block_asterisk_key="no" = "*" still comes through
+    as a value (used for the "hang up" menu option).
+    """
+    text = f"{result_text} {prompt}".strip() if result_text else prompt
+    ops = ["no", str(digits), str(digits), "7", "No", "no", "no", "", "", "", "", "", ""]
+    return f"read=t-{clean(text)}={varname},{','.join(ops)}"
 
 def yemot_response(body: str) -> Response:
     return Response(body, mimetype="text/plain; charset=utf-8")
@@ -148,7 +169,7 @@ def yemot_webhook(path_token=None):
     # its own query string after whatever URL you configured.
     if YEMOT_TOKEN and path_token != YEMOT_TOKEN:
         log.warning("Rejected request with bad/missing token")
-        return yemot_response(combine(id_list_message("אין הרשאה."), hangup()))
+        return yemot_response(id_list_message_hangup("אין הרשאה."))
 
     call_id = params.get("ApiCallId", "unknown")
     phone = params.get("ApiPhone", "")
@@ -156,10 +177,10 @@ def yemot_webhook(path_token=None):
     if ALLOWED_NUMBERS and phone not in ALLOWED_NUMBERS:
         log.warning("Rejected call from unauthorized number: %s", phone)
         return yemot_response(
-            combine(id_list_message("מצטערים, מספר זה אינו מורשה להשתמש בשירות."), hangup())
+            id_list_message_hangup("מצטערים, מספר זה אינו מורשה להשתמש בשירות.")
         )
 
-    # Step 1: PIN entry.
+    # Step 1: PIN entry (4 digits, "car_pin").
     # NOTE: we branch on server-side call state (authenticated_calls), NOT on
     # "is car_pin present in params" - Yemot may keep echoing back earlier
     # collected fields (car_pin included) on every later hit of the same
@@ -168,15 +189,15 @@ def yemot_webhook(path_token=None):
     if call_id not in authenticated_calls:
         if "car_pin" not in params:
             # very first hit of the call - nothing collected yet.
-            return yemot_response(read_digits("נא להקליד קוד סודי בן ארבע ספרות", "car_pin"))
+            return yemot_response(read_digits("נא להקליד קוד סודי בן ארבע ספרות", "car_pin", 4))
         if not YEMOT_PIN or params["car_pin"] != YEMOT_PIN:
             log.warning("Wrong PIN attempt from %s", phone)
-            return yemot_response(combine(id_list_message("קוד שגוי. השיחה תנותק."), hangup()))
+            return yemot_response(id_list_message_hangup("קוד שגוי. השיחה תנותק."))
         touch_call(call_id)
         if SINGLE_BRAND:
             call_vehicle[call_id] = SINGLE_BRAND
-            return yemot_response(read_digits(adapters[SINGLE_BRAND].menu_prompt(), "car_choice"))
-        return yemot_response(read_digits(vehicle_select_prompt(), "car_select"))
+            return yemot_response(read_digits(adapters[SINGLE_BRAND].menu_prompt(), "car_choice", 1))
+        return yemot_response(read_digits(vehicle_select_prompt(), "car_select", 1))
 
     touch_call(call_id)
 
@@ -188,16 +209,16 @@ def yemot_webhook(path_token=None):
         if idx.isdigit() and 1 <= int(idx) <= len(_brand_by_index):
             chosen = _brand_by_index[int(idx) - 1]
         if not chosen:
-            return yemot_response(read_digits("בחירה לא תקינה. " + vehicle_select_prompt(), "car_select"))
+            return yemot_response(read_digits(vehicle_select_prompt(), "car_select", 1, "בחירה לא תקינה."))
         call_vehicle[call_id] = chosen
-        return yemot_response(read_digits(adapters[chosen].menu_prompt(), "car_choice"))
+        return yemot_response(read_digits(adapters[chosen].menu_prompt(), "car_choice", 1))
 
     # Step 3: action choice within the already-chosen vehicle
     adapter = adapters[call_vehicle[call_id]]
     choice = params.get("car_choice", "")
 
     if choice == "*":
-        return yemot_response(combine(id_list_message("להתראות."), hangup()))
+        return yemot_response(id_list_message_hangup("להתראות."))
 
     try:
         result_text = adapter.handle_choice(choice)
@@ -206,11 +227,9 @@ def yemot_webhook(path_token=None):
         result_text = "אירעה שגיאה בביצוע הפעולה."
 
     if result_text is None:
-        return yemot_response(read_digits("בחירה לא תקינה. " + adapter.menu_prompt(), "car_choice"))
+        return yemot_response(read_digits(adapter.menu_prompt(), "car_choice", 1, "בחירה לא תקינה."))
 
-    return yemot_response(
-        combine(id_list_message(result_text), read_digits(adapter.menu_prompt(), "car_choice"))
-    )
+    return yemot_response(read_digits(adapter.menu_prompt(), "car_choice", 1, result_text))
 
 
 @app.route("/yemot-test", methods=["GET", "POST"])
@@ -223,11 +242,7 @@ def yemot_test():
     # api_link at this route for one test call, then remove this route
     # once the real cause is found - not meant to stay in the codebase.
     log.info("yemot-test hit: %s", request.args.to_dict() | request.form.to_dict())
-    return yemot_response(combine(id_list_message_raw("M1000"), hangup()))
-
-
-def id_list_message_raw(system_message_id: str) -> str:
-    return f"id_list_message={system_message_id}"
+    return yemot_response("id_list_message=M1000.g-hangup")
 
 
 @app.route("/health")
