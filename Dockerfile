@@ -57,7 +57,7 @@ RUN ${GATEWAY_VENV}/bin/python -m ensurepip --upgrade \
     && ${GATEWAY_VENV}/bin/python -m pip install --no-cache-dir flask cryptography
 
 # ---- Yemot bridge ----
-COPY bridge/yemot_bridge.py /usr/src/bridge/yemot_bridge.py
+COPY bridge/yemot_bridge.py bridge/store.py bridge/saic_client.py /usr/src/bridge/
 COPY bridge/vehicles/ /usr/src/bridge/vehicles/
 
 # ---- Mosquitto config ----
