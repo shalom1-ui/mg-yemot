@@ -40,6 +40,6 @@ class VehicleAdapter(ABC):
     def not_ready_text(self) -> str:
         """Shared message for brands whose API integration isn't done yet."""
         return (
-            f"התמיכה ב{self.display_name} עדיין בפיתוח ואינה זמינה כרגע. "
-            "מצטערים על אי הנוחות."
+            f"התמיכה ב{self.display_name} עדיין בפיתוח ואינה זמינה כרגע, "
+            "מצטערים על אי הנוחות"
         )

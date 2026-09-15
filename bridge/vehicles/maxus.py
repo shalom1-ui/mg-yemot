@@ -39,8 +39,8 @@ class MaxusAdapter(VehicleAdapter):
 
     def menu_prompt(self) -> str:
         return (
-            "התמיכה ברכבי מקסוס מיפה עדיין בפיתוח. "
-            "לחץ כוכבית לחזרה לתפריט הראשי."
+            "התמיכה ברכבי מקסוס מיפה עדיין בפיתוח, "
+            "לחץ כוכבית לחזרה לתפריט הראשי"
         )
 
     def handle_choice(self, choice: str):

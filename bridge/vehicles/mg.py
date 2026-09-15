@@ -70,19 +70,19 @@ class MgAdapter(VehicleAdapter):
     # -- actions -------------------------------------------------------
     def _action_ac_on(self):
         self._publish("climate/remoteClimateState/set", "on")
-        return "הפקודה להדלקת המזגן נשלחה. הרכב אמור להגיב תוך דקה עד שתיים."
+        return "הפקודה להדלקת המזגן נשלחה, הרכב אמור להגיב תוך דקה עד שתיים"
 
     def _action_ac_off(self):
         self._publish("climate/remoteClimateState/set", "off")
-        return "הפקודה לכיבוי המזגן נשלחה."
+        return "הפקודה לכיבוי המזגן נשלחה"
 
     def _action_lock(self):
         self._publish("doors/locked/set", "true")
-        return "הפקודה לנעילת הדלתות נשלחה."
+        return "הפקודה לנעילת הדלתות נשלחה"
 
     def _action_unlock(self):
         self._publish("doors/locked/set", "false")
-        return "הפקודה לפתיחת הדלתות נשלחה."
+        return "הפקודה לפתיחת הדלתות נשלחה"
 
     def _action_find_car(self):
         self._publish("location/findMyCar/set", "activate")
@@ -92,7 +92,7 @@ class MgAdapter(VehicleAdapter):
             self._publish("location/findMyCar/set", "stop")
 
         threading.Thread(target=stop_later, daemon=True).start()
-        return "הרכב יצפצף ויהבהב באורות למשך כעשרים שניות."
+        return "הרכב יצפצף ויהבהב באורות למשך כעשרים שניות"
 
     def _action_status(self):
         soc = self.status_cache.get("drivetrain/soc")
@@ -119,7 +119,7 @@ class MgAdapter(VehicleAdapter):
         else:
             parts.append("אין עדיין נתון מיקום")
 
-        return ". ".join(parts) + "."
+        return ", ".join(parts)
 
     _MENU = {
         "1": _action_ac_on,
@@ -131,14 +131,18 @@ class MgAdapter(VehicleAdapter):
     }
 
     def menu_prompt(self) -> str:
+        # Commas (not periods) between phrases: periods are a reserved
+        # structural character in Yemot's protocol and get stripped to a
+        # bare space by clean() (no TTS pause at all); commas survive and
+        # give the speech engine a natural pause between menu options.
         return (
-            "לחץ אחת להדלקת מזגן. "
-            "לחץ שתיים לכיבוי מזגן. "
-            "לחץ שלוש לנעילת דלתות. "
-            "לחץ ארבע לפתיחת דלתות. "
-            "לחץ חמש לשמיעת סטטוס הרכב. "
-            "לחץ שש לצפצוף ואיתור הרכב. "
-            "לחץ כוכבית לסיום."
+            "לחץ אחת להדלקת מזגן, "
+            "לחץ שתיים לכיבוי מזגן, "
+            "לחץ שלוש לנעילת דלתות, "
+            "לחץ ארבע לפתיחת דלתות, "
+            "לחץ חמש לשמיעת סטטוס הרכב, "
+            "לחץ שש לצפצוף ואיתור הרכב, "
+            "לחץ כוכבית לסיום"
         )
 
     def handle_choice(self, choice: str):

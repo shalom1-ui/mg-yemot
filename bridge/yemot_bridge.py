@@ -90,11 +90,12 @@ _HEBREW_DIGIT_WORDS = [
 ]
 
 def vehicle_select_prompt() -> str:
+    # Comma, not period, between phrases - see clean()'s comment.
     parts = [
-        f"לחץ {_HEBREW_DIGIT_WORDS[i]} עבור {adapter.display_name}."
+        f"לחץ {_HEBREW_DIGIT_WORDS[i]} עבור {adapter.display_name}"
         for i, adapter in enumerate(adapters.values())
     ]
-    return " ".join(parts)
+    return ", ".join(parts)
 
 _brand_by_index = list(adapters.keys())
 
