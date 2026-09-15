@@ -39,16 +39,29 @@ class MgAdapter(VehicleAdapter):
             self.user.vin = vin
         return self.user.vin
 
+    def _fire_and_forget(self, action_fn):
+        """
+        Kick off a slow SaicApi command in the background instead of
+        blocking the phone response on it. Needed for AC-on specifically:
+        live testing showed it can take longer than saic_client's 20s
+        call timeout to be confirmed (compressor spin-up is genuinely
+        slow), which made the call time out, retry, and finally report a
+        Hebrew error to the caller - even though both attempts actually
+        reached the car (seen as the car's light activating twice for one
+        button press). Fire-and-forget matches what the response text
+        already promises ("the car should respond within a minute or
+        two") instead of synchronously waiting for that response.
+        """
+        def run():
+            try:
+                saic_client.call(self.user, action_fn)
+            except Exception:
+                log.exception("Background command failed for user %s", self.user.id)
+        threading.Thread(target=run, daemon=True).start()
+
     # -- actions -------------------------------------------------------
     def _action_ac_on(self):
-        saic_client.call(self.user, lambda api: api.start_ac(self.vin))
-        # Live testing found that a command right after AC-on (e.g. unlock)
-        # can silently fail to reach the car, while the same sequence works
-        # fine in MG's own smartphone app - the app's UI implicitly paces
-        # the user (spinner/disabled button) while our IVR menu doesn't.
-        # This deliberate pause approximates that pacing - AC-on specifically
-        # is the slow one to settle server-side; AC-off/lock/unlock aren't.
-        time.sleep(5)
+        self._fire_and_forget(lambda api: api.start_ac(self.vin))
         return "הפקודה להדלקת המזגן נשלחה, הרכב אמור להגיב תוך דקה עד שתיים"
 
     def _action_ac_off(self):
@@ -66,7 +79,7 @@ class MgAdapter(VehicleAdapter):
         return "הפקודה לכיבוי חימום מושבים נשלחה"
 
     def _action_front_defrost(self):
-        saic_client.call(self.user, lambda api: api.start_front_defrost(self.vin))
+        self._fire_and_forget(lambda api: api.start_front_defrost(self.vin))
         return "הפקודה להפשרת השמשה הקדמית נשלחה"
 
     def _action_lock(self):
