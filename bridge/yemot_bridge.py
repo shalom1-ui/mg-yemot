@@ -134,6 +134,7 @@ def read_digits(prompt: str, varname: str, digits: int, result_text: str = "") -
     return f"read=t-{clean(text)}={varname},{','.join(ops)}"
 
 def yemot_response(body: str) -> Response:
+    log.info("yemot response: %s", body)
     return Response(body, mimetype="text/plain; charset=utf-8")
 
 # ---------------------------------------------------------------------------
@@ -160,6 +161,7 @@ app = Flask(__name__)
 @app.route("/yemot/<path_token>", methods=["GET", "POST"])
 def yemot_webhook(path_token=None):
     params = {**request.args.to_dict(), **request.form.to_dict()}
+    log.info("yemot request: call_id=%s params=%s", params.get("ApiCallId"), params)
 
     # The token lives in the URL PATH (/yemot/<token>), not a query string
     # param - Yemot's api_link feature appends its own params with a
