@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from typing import Awaitable, Callable, TypeVar
 
@@ -43,6 +44,21 @@ _call_locks_guard = threading.Lock()
 class Busy(Exception):
     """Raised by call() when another command for the same user is still
     being processed and the wait_for_lock window ran out - see call()."""
+
+
+def _is_auth_error(e: SaicApiException) -> bool:
+    """
+    True for a SaicApiException that's a plain expired/missing auth token
+    (HTTP-style 401/403 - "Token missing, Authentication failed!" is what
+    a stale cached login actually looks like, found via live testing
+    2026-09-16) - the one kind of SaicApiException a fresh login CAN fix,
+    unlike a business-logic rejection like "too frequent operations" or
+    "another command in progress". SaicApiException doesn't expose the
+    numeric return code as its own attribute, only baked into the message
+    string, hence the regex.
+    """
+    m = re.search(r"return code:\s*(\d+)", str(e))
+    return m is not None and m.group(1) in ("401", "403")
 
 
 def _get_call_lock(user_id: int) -> threading.Lock:
@@ -155,14 +171,38 @@ def call(
         try:
             return run_async(action(client), timeout=action_timeout)
         except SaicApiException as e:
-            # A real, structured rejection FROM MG's OWN API - e.g. "Too
-            # frequent operations. Please use the physical key to restart
-            # the vehicle...". Found via live testing (2026-09-16) that
-            # blindly retrying on every failure (below) was making this
-            # specific error worse: retrying right after a rate-limit
-            # rejection is itself another "too frequent" operation. A
-            # fresh login can't fix a rejection like this anyway, so don't
-            # retry - propagate MG's own message as-is.
+            if _is_auth_error(e):
+                # A plain expired/missing token ("Token missing,
+                # Authentication failed!") - the login cached from earlier
+                # in the process's life is just stale. A fresh login
+                # genuinely fixes this, unlike the business-logic
+                # rejections below.
+                log.warning(
+                    "SaicApi auth error for user %s (%s), retrying after re-login",
+                    user.id, e,
+                )
+                with _state_lock:
+                    _logged_in.discard(user.id)
+                try:
+                    run_async(client.login(), timeout=action_timeout)
+                    with _state_lock:
+                        _logged_in.add(user.id)
+                    return run_async(action(client), timeout=action_timeout)
+                except Exception as e2:
+                    log.error(
+                        "SaicApi call failed again for user %s after re-login (%s: %s)",
+                        user.id, type(e2).__name__, e2,
+                    )
+                    raise
+            # Everything else here is a real, structured BUSINESS-LOGIC
+            # rejection FROM MG's OWN API - e.g. "Too frequent operations.
+            # Please use the physical key to restart the vehicle..." or
+            # "Other remote command in progress. Please try again later."
+            # Found via live testing (2026-09-16) that blindly retrying on
+            # every failure was making these specific errors worse -
+            # retrying right after a rate-limit rejection is itself
+            # another "too frequent" operation, and no login can fix
+            # either of them anyway - propagate MG's own message as-is.
             log.warning("SaicApi rejected call for user %s: %s", user.id, e)
             raise
         except Exception as e:
