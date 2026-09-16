@@ -20,6 +20,7 @@ import threading
 from typing import Awaitable, Callable, TypeVar
 
 from saic_ismart_client_ng import SaicApi
+from saic_ismart_client_ng.exceptions import SaicApiException
 from saic_ismart_client_ng.model import SaicApiConfiguration
 
 import store
@@ -54,7 +55,25 @@ def _get_call_lock(user_id: int) -> threading.Lock:
 
 
 def run_async(coro: Awaitable[T], timeout: float = 20.0) -> T:
-    return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=timeout)
+    """
+    Run one coroutine on the shared event loop and wait up to `timeout`.
+
+    Bug found 2026-09-16 via live testing: `Future.result(timeout=...)`
+    raising TimeoutError only stops *waiting* - it does NOT cancel the
+    coroutine, which keeps running on the event loop regardless. call()'s
+    retry-after-failure logic would then submit a SECOND, genuinely
+    concurrent request for the same command while the first (abandoned
+    but still alive) one was still in flight - almost certainly what
+    triggered MG's own "Too frequent operations" rejection, not real
+    external rate limiting. Explicitly cancelling on timeout is required
+    before it's safe to retry anything.
+    """
+    future = asyncio.run_coroutine_threadsafe(coro, _loop)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        raise
 
 
 def _get_client(user: store.User) -> SaicApi:
@@ -135,6 +154,17 @@ def call(
 
         try:
             return run_async(action(client), timeout=action_timeout)
+        except SaicApiException as e:
+            # A real, structured rejection FROM MG's OWN API - e.g. "Too
+            # frequent operations. Please use the physical key to restart
+            # the vehicle...". Found via live testing (2026-09-16) that
+            # blindly retrying on every failure (below) was making this
+            # specific error worse: retrying right after a rate-limit
+            # rejection is itself another "too frequent" operation. A
+            # fresh login can't fix a rejection like this anyway, so don't
+            # retry - propagate MG's own message as-is.
+            log.warning("SaicApi rejected call for user %s: %s", user.id, e)
+            raise
         except Exception as e:
             log.warning(
                 "SaicApi call failed for user %s (%s: %s), retrying after re-login",
@@ -143,6 +173,9 @@ def call(
             try:
                 run_async(client.login(), timeout=action_timeout)
                 return run_async(action(client), timeout=action_timeout)
+            except SaicApiException as e2:
+                log.warning("SaicApi rejected retry for user %s: %s", user.id, e2)
+                raise
             except Exception as e2:
                 log.error(
                     "SaicApi call failed again for user %s after re-login (%s: %s)",
