@@ -32,9 +32,7 @@ services:
       - key: YEMOT_TOKEN
         sync: false
       - key: YEMOT_PIN
-        sync: false
-      - key: YEMOT_ALLOWED_NUMBERS
-        sync: false
+        sync: false   # always required to enter, even from a recognized number
       # Multi-tenant additions (2026-09-15):
       - key: ENCRYPTION_KEY
         sync: false   # generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

@@ -12,23 +12,23 @@ Flow:
   2. This server replies with a small plain-text "mini language" that Yemot
      understands: id_list_message (play a message), read (ask for digits and
      store them under a variable name), hangup, etc.
-  3. The caller is identified either by their phone number (caller ID,
-     matched against a registered user - see store.py) or, if that doesn't
-     match, by a 4-digit PIN. Once identified, they get straight to their
-     own car's action menu - each user has exactly one car/brand, so there
-     is no separate "pick a vehicle" step.
+  3. The caller is identified by a 4-digit PIN (see store.py) - always
+     required, never skipped based on caller ID (a stolen phone can still
+     place calls as its own number, so the number alone proves nothing).
+     Once identified, they get straight to their own car's action menu -
+     each user has exactly one car/brand, so there is no separate "pick a
+     vehicle" step.
 
 MULTI-TENANCY (2026-09-15): originally this whole file was wired to exactly
-one hard-coded MG account via env vars. It now looks callers up in a small
-per-user SQLite store (store.py) so more than one person can use the same
-Yemot line/number, each with their own MG account - see saic_client.py for
-how commands reach each user's own car directly (no MQTT, no per-account
-gateway process anymore). The single original account still works exactly
-as before with zero setup, via a "legacy user" synthesized from the same
-env vars it always used (SAIC_USER/PASSWORD/REGION, YEMOT_PIN,
-YEMOT_ALLOWED_NUMBERS) - see resolve_user() below - so nothing needs to
-change for that account; new people get added via POST /signup/<ADMIN_TOKEN>
-instead.
+one hard-coded MG account via env vars. It now looks callers up by PIN in a
+small per-user SQLite store (store.py) so more than one person can use the
+same Yemot line/number, each with their own MG account - see saic_client.py
+for how commands reach each user's own car directly (no MQTT, no
+per-account gateway process anymore). The single original account still
+works exactly as before with zero setup, via a "legacy user" synthesized
+from the same env vars it always used (SAIC_USER/PASSWORD/REGION,
+YEMOT_PIN) - see resolve_user() below - so nothing needs to change for
+that account; new people get added via POST /signup/<ADMIN_TOKEN> instead.
 
 NOTE ON PROTOCOL ACCURACY:
   Fixed 2026-09-15: the original syntax here (based on generic community
@@ -69,9 +69,6 @@ log = logging.getLogger("yemot-bridge")
 # ---------------------------------------------------------------------------
 YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "")
 YEMOT_PIN = os.environ.get("YEMOT_PIN", "")
-ALLOWED_NUMBERS = {
-    n.strip() for n in os.environ.get("YEMOT_ALLOWED_NUMBERS", "").split(",") if n.strip()
-}
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
 # Render assigns a port dynamically via $PORT - always bind to that if present.
@@ -105,18 +102,21 @@ if os.environ.get("SAIC_USER") and os.environ.get("SAIC_PASSWORD"):
     )
 
 
-def resolve_user(phone: str, pin: str | None = None) -> "store.User | None":
-    user = store.get_user_by_phone(phone)
+def resolve_user(pin: str) -> "store.User | None":
+    """
+    Identify the caller by PIN alone - always required, never skipped for a
+    recognized phone number (2026-09-16: originally a caller-ID match on
+    YEMOT_ALLOWED_NUMBERS skipped the PIN prompt entirely, but the user
+    pointed out that's not real authentication - a stolen phone can still
+    place calls as its own number, and would then get straight to the car
+    menu with no PIN at all. PINs are unique per user (store.py's UNIQUE
+    constraint), so the phone number was never actually needed to resolve
+    who's calling, just to *skip* asking - removing that removes the gap.
+    """
+    user = store.get_user_by_pin(pin)
     if user:
         return user
-    if pin:
-        user = store.get_user_by_pin(pin)
-        if user:
-            return user
-    if _legacy_user and (
-        (ALLOWED_NUMBERS and phone in ALLOWED_NUMBERS)
-        or (pin is not None and YEMOT_PIN and pin == YEMOT_PIN)
-    ):
+    if _legacy_user and YEMOT_PIN and pin == YEMOT_PIN:
         return _legacy_user
     return None
 
@@ -229,24 +229,21 @@ def yemot_webhook(path_token=None):
     call_id = params.get("ApiCallId", "unknown")
     phone = params.get("ApiPhone", "")
 
-    # Step 1: identify the caller - by phone number (caller ID) first, same
-    # "a known number is already authentication" reasoning as before, else
-    # by a 4-digit PIN. NOTE: we branch on server-side call state
-    # (call_user), NOT on "is car_pin present in params" - Yemot may keep
-    # echoing back earlier collected fields on every later hit of the same
-    # call, and branching on their mere presence would re-trigger this
-    # block forever, trapping the caller in a loop that never reaches the
-    # menu.
+    # Step 1: identify the caller by a 4-digit PIN - always required, even
+    # for a recognized number (see resolve_user()'s docstring for why).
+    # NOTE: we branch on server-side call state (call_user), NOT on "is
+    # car_pin present in params" - Yemot may keep echoing back earlier
+    # collected fields on every later hit of the same call, and branching
+    # on their mere presence would re-trigger this block forever, trapping
+    # the caller in a loop that never reaches the menu.
     if call_id not in call_user:
-        user = resolve_user(phone)
+        if "car_pin" not in params:
+            # very first hit of the call - nothing collected yet.
+            return yemot_response(read_digits("נא להקליד קוד סודי בן ארבע ספרות", "car_pin", 4))
+        user = resolve_user(params["car_pin"])
         if not user:
-            if "car_pin" not in params:
-                # very first hit of the call - nothing collected yet.
-                return yemot_response(read_digits("נא להקליד קוד סודי בן ארבע ספרות", "car_pin", 4))
-            user = resolve_user(phone, params["car_pin"])
-            if not user:
-                log.warning("Wrong PIN attempt from %s", phone)
-                return yemot_response(id_list_message_hangup("קוד שגוי. השיחה תנותק."))
+            log.warning("Wrong PIN attempt from %s", phone)
+            return yemot_response(id_list_message_hangup("קוד שגוי. השיחה תנותק."))
 
         touch_call(call_id)
         call_user[call_id] = user
@@ -281,7 +278,9 @@ def yemot_webhook(path_token=None):
 
 
 # ---------------------------------------------------------------------------
-# Signup - adds a new user (their own MG account, PIN and/or phone number).
+# Signup - adds a new user (their own MG account + a PIN, the only thing
+# that identifies them on a call - see resolve_user()'s docstring for why
+# phone number alone is deliberately not enough).
 # Not exposed over the Yemot phone flow (no practical way to type an email +
 # password on a kosher-phone keypad) - a one-time web form instead, meant to
 # be filled in from a real browser by whoever is onboarding a new person.
@@ -302,7 +301,7 @@ button {{ margin-top: 1.5em; padding: 0.6em 1.5em; font-size: 1em; }}
 <h1>חיבור חשבון MG למערכת הטלפונית</h1>
 {message}
 <form method="post">
-<label>מספר טלפון (אופציונלי - אם מוזן, יזהה אוטומטית בלי קוד):
+<label>מספר טלפון (אופציונלי, לתיעוד בלבד - הזיהוי בשיחה הוא תמיד לפי הקוד הסודי):
 <input name="phone" placeholder="0501234567"></label>
 <label>קוד סודי בן 4 ספרות (חובה):
 <input name="pin" required pattern="[0-9]{{4}}" maxlength="4"></label>

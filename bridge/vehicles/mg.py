@@ -40,30 +40,31 @@ class MgAdapter(VehicleAdapter):
         return self.user.vin
 
     # -- actions -------------------------------------------------------
+    # Every command below is fire-and-forget (saic_client.enqueue), not
+    # just AC-on: live testing found unlock alone could take 12s, then
+    # 24s+, then time out entirely (real TimeoutError from MG's cloud, not
+    # a bug in the retry logic) when sent shortly after AC-on - MG's cloud
+    # can genuinely be slow to confirm ANY command while another one for
+    # the same car is still settling, not just climate ones. A phone call
+    # can't be blocked waiting that long, so every action now returns
+    # "sent" immediately and the actual work happens in the background,
+    # still serialized per user (saic_client.call()'s lock) so commands
+    # never race each other regardless of how the caller presses keys.
     def _action_ac_on(self):
-        # AC-on genuinely takes longer than a normal command to be
-        # confirmed server-side (compressor spin-up) - saic_client.enqueue()
-        # runs it in the background instead of blocking the phone response
-        # on it, matching what the response text already promises ("the
-        # car should respond within a minute or two"). It's still
-        # serialized against any other command for this user - see
-        # saic_client.call()'s per-user lock - so a fast command like
-        # unlock pressed right after won't race it and silently fail to
-        # reach the car (found via live testing: it did, before this fix).
         saic_client.enqueue(self.user, lambda api: api.start_ac(self.vin))
         return "הפקודה להדלקת המזגן נשלחה, הרכב אמור להגיב תוך דקה עד שתיים"
 
     def _action_ac_off(self):
-        saic_client.call(self.user, lambda api: api.stop_ac(self.vin))
+        saic_client.enqueue(self.user, lambda api: api.stop_ac(self.vin))
         return "הפקודה לכיבוי המזגן נשלחה"
 
     def _action_seat_heat_on(self):
-        saic_client.call(self.user, lambda api: api.control_heated_seats(
+        saic_client.enqueue(self.user, lambda api: api.control_heated_seats(
             self.vin, left_side_level=3, right_side_level=3))
         return "הפקודה להדלקת חימום מושבים נשלחה"
 
     def _action_seat_heat_off(self):
-        saic_client.call(self.user, lambda api: api.control_heated_seats(
+        saic_client.enqueue(self.user, lambda api: api.control_heated_seats(
             self.vin, left_side_level=0, right_side_level=0))
         return "הפקודה לכיבוי חימום מושבים נשלחה"
 
@@ -72,24 +73,21 @@ class MgAdapter(VehicleAdapter):
         return "הפקודה להפשרת השמשה הקדמית נשלחה"
 
     def _action_lock(self):
-        saic_client.call(self.user, lambda api: api.lock_vehicle(self.vin))
+        saic_client.enqueue(self.user, lambda api: api.lock_vehicle(self.vin))
         return "הפקודה לנעילת הדלתות נשלחה"
 
     def _action_unlock(self):
-        saic_client.call(self.user, lambda api: api.unlock_vehicle(self.vin))
+        saic_client.enqueue(self.user, lambda api: api.unlock_vehicle(self.vin))
         return "הפקודה לפתיחת הדלתות נשלחה"
 
     def _action_find_car(self):
-        saic_client.call(self.user, lambda api: api.control_find_my_car(self.vin))
+        saic_client.enqueue(self.user, lambda api: api.control_find_my_car(self.vin))
 
         def stop_later():
             time.sleep(20)
-            try:
-                saic_client.call(
-                    self.user, lambda api: api.control_find_my_car(self.vin, should_stop=True)
-                )
-            except Exception:
-                log.exception("Failed to auto-stop find-my-car for user %s", self.user.id)
+            saic_client.enqueue(
+                self.user, lambda api: api.control_find_my_car(self.vin, should_stop=True)
+            )
 
         threading.Thread(target=stop_later, daemon=True).start()
         return "הרכב יצפצף ויהבהב באורות למשך כעשרים שניות"
