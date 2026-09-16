@@ -39,29 +39,18 @@ class MgAdapter(VehicleAdapter):
             self.user.vin = vin
         return self.user.vin
 
-    def _fire_and_forget(self, action_fn):
-        """
-        Kick off a slow SaicApi command in the background instead of
-        blocking the phone response on it. Needed for AC-on specifically:
-        live testing showed it can take longer than saic_client's 20s
-        call timeout to be confirmed (compressor spin-up is genuinely
-        slow), which made the call time out, retry, and finally report a
-        Hebrew error to the caller - even though both attempts actually
-        reached the car (seen as the car's light activating twice for one
-        button press). Fire-and-forget matches what the response text
-        already promises ("the car should respond within a minute or
-        two") instead of synchronously waiting for that response.
-        """
-        def run():
-            try:
-                saic_client.call(self.user, action_fn)
-            except Exception:
-                log.exception("Background command failed for user %s", self.user.id)
-        threading.Thread(target=run, daemon=True).start()
-
     # -- actions -------------------------------------------------------
     def _action_ac_on(self):
-        self._fire_and_forget(lambda api: api.start_ac(self.vin))
+        # AC-on genuinely takes longer than a normal command to be
+        # confirmed server-side (compressor spin-up) - saic_client.enqueue()
+        # runs it in the background instead of blocking the phone response
+        # on it, matching what the response text already promises ("the
+        # car should respond within a minute or two"). It's still
+        # serialized against any other command for this user - see
+        # saic_client.call()'s per-user lock - so a fast command like
+        # unlock pressed right after won't race it and silently fail to
+        # reach the car (found via live testing: it did, before this fix).
+        saic_client.enqueue(self.user, lambda api: api.start_ac(self.vin))
         return "הפקודה להדלקת המזגן נשלחה, הרכב אמור להגיב תוך דקה עד שתיים"
 
     def _action_ac_off(self):
@@ -79,7 +68,7 @@ class MgAdapter(VehicleAdapter):
         return "הפקודה לכיבוי חימום מושבים נשלחה"
 
     def _action_front_defrost(self):
-        self._fire_and_forget(lambda api: api.start_front_defrost(self.vin))
+        saic_client.enqueue(self.user, lambda api: api.start_front_defrost(self.vin))
         return "הפקודה להפשרת השמשה הקדמית נשלחה"
 
     def _action_lock(self):
@@ -158,6 +147,8 @@ class MgAdapter(VehicleAdapter):
             return None
         try:
             return action(self)
+        except saic_client.Busy:
+            return "יש עדיין פקודה קודמת בביצוע, נסו שוב בעוד כמה שניות"
         except Exception:
             log.exception("MG action %r failed for user %s", choice, self.user.id)
             return "אירעה שגיאה בתקשורת עם הענן של MG, נסו שוב בעוד רגע"

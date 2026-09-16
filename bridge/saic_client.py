@@ -35,8 +35,25 @@ _clients: dict[int, SaicApi] = {}
 _logged_in: set[int] = set()
 _state_lock = threading.Lock()
 
+_call_locks: dict[int, threading.Lock] = {}
+_call_locks_guard = threading.Lock()
 
-def run_async(coro: Awaitable[T], timeout: float = 20.0) -> T:
+
+class Busy(Exception):
+    """Raised by call() when another command for the same user is still
+    being processed and the wait_for_lock window ran out - see call()."""
+
+
+def _get_call_lock(user_id: int) -> threading.Lock:
+    with _call_locks_guard:
+        lock = _call_locks.get(user_id)
+        if lock is None:
+            lock = threading.Lock()
+            _call_locks[user_id] = lock
+        return lock
+
+
+def run_async(coro: Awaitable[T], timeout: float = 45.0) -> T:
     return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=timeout)
 
 
@@ -77,24 +94,61 @@ def validate_credentials(user: store.User) -> SaicApi:
     return client
 
 
-def call(user: store.User, action: Callable[[SaicApi], Awaitable[T]]) -> T:
+def call(
+    user: store.User,
+    action: Callable[[SaicApi], Awaitable[T]],
+    wait_for_lock: float = 8.0,
+) -> T:
     """
     Run one authenticated SaicApi call for this user: logs in first if this
     is the first call for them in this process, and retries once after a
     fresh login if the call raises (covers token expiry) - simpler and more
     robust than trying to predict/track token expiry ourselves.
-    """
-    client = _get_client(user)
-    with _state_lock:
-        already_logged_in = user.id in _logged_in
-    if not already_logged_in:
-        run_async(client.login())
-        with _state_lock:
-            _logged_in.add(user.id)
 
+    Serialized per user via a lock: real testing found a fast command
+    (unlock) sent shortly after a slow one (AC-on, still running in the
+    background via enqueue() below) could silently fail to reach the car -
+    MG's own smartphone app avoids this by disabling its buttons until the
+    previous command settles server-side; holding a per-user lock for the
+    duration of each command has the same effect. If the lock is still
+    held after `wait_for_lock` seconds, raises Busy instead of blocking
+    the phone call indefinitely - the caller should tell the user to wait
+    and try again rather than hang the call.
+    """
+    lock = _get_call_lock(user.id)
+    if not lock.acquire(timeout=wait_for_lock):
+        raise Busy(f"user {user.id} has a command still in progress")
     try:
-        return run_async(action(client))
-    except Exception:
-        log.warning("SaicApi call failed for user %s, retrying after re-login", user.id)
-        run_async(client.login())
-        return run_async(action(client))
+        client = _get_client(user)
+        with _state_lock:
+            already_logged_in = user.id in _logged_in
+        if not already_logged_in:
+            run_async(client.login())
+            with _state_lock:
+                _logged_in.add(user.id)
+
+        try:
+            return run_async(action(client))
+        except Exception:
+            log.warning("SaicApi call failed for user %s, retrying after re-login", user.id)
+            run_async(client.login())
+            return run_async(action(client))
+    finally:
+        lock.release()
+
+
+def enqueue(user: store.User, action: Callable[[SaicApi], Awaitable[T]]) -> None:
+    """
+    Fire-and-forget version of call() for slow commands (AC-on, front
+    defrost): runs in a background thread so the phone can respond
+    immediately instead of blocking on cloud confirmation. Goes through
+    the same per-user lock as call() (by calling it), with a generous wait
+    since nothing user-facing is blocked on it - it can afford to just
+    wait its turn if another command happens to be running already.
+    """
+    def run():
+        try:
+            call(user, action, wait_for_lock=120.0)
+        except Exception:
+            log.exception("Background SaicApi command failed for user %s", user.id)
+    threading.Thread(target=run, daemon=True, name=f"saic-bg-{user.id}").start()
