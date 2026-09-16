@@ -53,7 +53,7 @@ def _get_call_lock(user_id: int) -> threading.Lock:
         return lock
 
 
-def run_async(coro: Awaitable[T], timeout: float = 45.0) -> T:
+def run_async(coro: Awaitable[T], timeout: float = 20.0) -> T:
     return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=timeout)
 
 
@@ -97,7 +97,8 @@ def validate_credentials(user: store.User) -> SaicApi:
 def call(
     user: store.User,
     action: Callable[[SaicApi], Awaitable[T]],
-    wait_for_lock: float = 8.0,
+    wait_for_lock: float = 5.0,
+    action_timeout: float = 12.0,
 ) -> T:
     """
     Run one authenticated SaicApi call for this user: logs in first if this
@@ -114,6 +115,11 @@ def call(
     held after `wait_for_lock` seconds, raises Busy instead of blocking
     the phone call indefinitely - the caller should tell the user to wait
     and try again rather than hang the call.
+
+    `action_timeout` is deliberately short (worst case with the one retry:
+    roughly 3x this) - a foreground call blocks the phone's HTTP response,
+    and Yemot itself won't wait around forever for us to answer. Slow
+    commands should go through enqueue() below instead of raising this.
     """
     lock = _get_call_lock(user.id)
     if not lock.acquire(timeout=wait_for_lock):
@@ -123,16 +129,26 @@ def call(
         with _state_lock:
             already_logged_in = user.id in _logged_in
         if not already_logged_in:
-            run_async(client.login())
+            run_async(client.login(), timeout=action_timeout)
             with _state_lock:
                 _logged_in.add(user.id)
 
         try:
-            return run_async(action(client))
-        except Exception:
-            log.warning("SaicApi call failed for user %s, retrying after re-login", user.id)
-            run_async(client.login())
-            return run_async(action(client))
+            return run_async(action(client), timeout=action_timeout)
+        except Exception as e:
+            log.warning(
+                "SaicApi call failed for user %s (%s: %s), retrying after re-login",
+                user.id, type(e).__name__, e,
+            )
+            try:
+                run_async(client.login(), timeout=action_timeout)
+                return run_async(action(client), timeout=action_timeout)
+            except Exception as e2:
+                log.error(
+                    "SaicApi call failed again for user %s after re-login (%s: %s)",
+                    user.id, type(e2).__name__, e2,
+                )
+                raise
     finally:
         lock.release()
 
@@ -142,13 +158,12 @@ def enqueue(user: store.User, action: Callable[[SaicApi], Awaitable[T]]) -> None
     Fire-and-forget version of call() for slow commands (AC-on, front
     defrost): runs in a background thread so the phone can respond
     immediately instead of blocking on cloud confirmation. Goes through
-    the same per-user lock as call() (by calling it), with a generous wait
-    since nothing user-facing is blocked on it - it can afford to just
-    wait its turn if another command happens to be running already.
+    the same per-user lock as call() (by calling it), with generous
+    timeouts since nothing user-facing is waiting on it.
     """
     def run():
         try:
-            call(user, action, wait_for_lock=120.0)
+            call(user, action, wait_for_lock=120.0, action_timeout=60.0)
         except Exception:
             log.exception("Background SaicApi command failed for user %s", user.id)
     threading.Thread(target=run, daemon=True, name=f"saic-bg-{user.id}").start()
