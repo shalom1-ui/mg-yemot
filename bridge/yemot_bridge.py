@@ -315,11 +315,12 @@ fieldset {{ margin-top: 1em; border-radius: 0.3em; }}
 <form method="post">
 <label>מותג הרכב:
 <select name="brand" required onchange="
-document.getElementById('mg-fields').hidden = this.value !== 'mg';
+document.getElementById('mg-fields').hidden = (this.value !== 'mg' &amp;&amp; this.value !== 'maxus');
 document.getElementById('chery-fields').hidden = this.value !== 'chery';
 ">
 <option value="">- בחר/י -</option>
 <option value="mg" {mg_selected}>MG</option>
+<option value="maxus" {maxus_selected}>מקסוס / מיפה (Maxus/MIFA)</option>
 <option value="chery" {chery_selected}>צ'רי / ג'קו / אומודה (Chery/Jaecoo/Omoda)</option>
 </select></label>
 <label>מספר טלפון (אופציונלי, לתיעוד בלבד - הזיהוי בשיחה הוא תמיד לפי הקוד הסודי):
@@ -328,7 +329,9 @@ document.getElementById('chery-fields').hidden = this.value !== 'chery';
 <input name="pin" required pattern="[0-9]{{4}}" maxlength="4" value="{pin}"></label>
 
 <fieldset id="mg-fields" hidden>
-<legend>פרטי חשבון MG iSMART</legend>
+<legend>פרטי חשבון iSMART (MG / מקסוס-מיפה - אותה מערכת חשבונות)</legend>
+<p>למקסוס/מיפה: נסו לרשום את הרכב באפליקציית <b>MG iSMART</b> (לא Hi MAXUS
+Europe) עם ה-VIN שלו - אם זה מצליח, ממלאים כאן את פרטי אותו חשבון.</p>
 <label>אימייל:
 <input name="mg_email" type="email"></label>
 <label>סיסמה:
@@ -369,6 +372,7 @@ def _signup_render(
         SIGNUP_FORM_HTML.format(
             message=f'<div class="msg {"ok" if ok else "err"}">{message}</div>' if message else "",
             mg_selected="selected" if brand == "mg" else "",
+            maxus_selected="selected" if brand == "maxus" else "",
             chery_selected="selected" if brand == "chery" else "",
             phone=phone, pin=pin,
             default_region=DEFAULT_SAIC_REGION, default_base_uri=DEFAULT_SAIC_BASE_URI,
@@ -407,8 +411,11 @@ def signup(token):
         return _signup_render("חסרים שדות חובה (קוד סודי, מותג)", ok=False, status=400,
                                phone=phone or "", pin=pin, brand=brand)
 
-    # ---- MG: single step, validated immediately against the real cloud ----
-    if brand == "mg":
+    # ---- MG / Maxus-MIFA: single step, validated immediately against the
+    # real cloud. Same fields, same credential shape, same underlying
+    # SAIC iSMART account system for both - see vehicles/maxus.py's
+    # docstring for why Maxus is just "MG with a different brand id". ----
+    if brand in ("mg", "maxus"):
         mg_email = request.form.get("mg_email", "").strip()
         mg_password = request.form.get("mg_password", "")
         saic_base_uri = request.form.get("saic_base_uri", "").strip() or DEFAULT_SAIC_BASE_URI
@@ -424,18 +431,18 @@ def signup(token):
             "saic_tenant_id": DEFAULT_SAIC_TENANT_ID,
         }
         # A throwaway user record, not saved yet: validate the credentials
-        # against MG's real cloud before writing anything, so a typo is
+        # against the real cloud before writing anything, so a typo is
         # caught here instead of silently failing on the first real call.
-        temp_user = store.User(id=0, phone=phone, pin=pin, brand="mg", credentials=credentials)
+        temp_user = store.User(id=0, phone=phone, pin=pin, brand=brand, credentials=credentials)
         try:
             client = saic_client.validate_credentials(temp_user)
             vehicle_list = saic_client.run_async(client.vehicle_list())
             vin = vehicle_list.vinList[0].vin
         except Exception as e:
-            log.exception("Signup login failed for %s", mg_email)
-            return _signup_render(f"ההתחברות לחשבון MG נכשלה: {e}", ok=False, status=400,
+            log.exception("Signup login failed for %s (brand=%s)", mg_email, brand)
+            return _signup_render(f"ההתחברות נכשלה: {e}", ok=False, status=400,
                                    phone=phone or "", pin=pin, brand=brand)
-        return _finish_signup(phone=phone, pin=pin, brand="mg", credentials=credentials, vin=vin)
+        return _finish_signup(phone=phone, pin=pin, brand=brand, credentials=credentials, vin=vin)
 
     # ---- Chery/Jaecoo/Omoda: two steps (request email code, then use it) ----
     if brand == "chery":

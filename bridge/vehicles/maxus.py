@@ -1,49 +1,32 @@
 """
-Maxus (MIFA 7 / MIFA 9) adapter - STUB, not yet functional.
+Maxus / MIFA (7, 9, eT60, eDeliver...) adapter.
 
-Unlike MG, there is no existing open-source library for the Maxus/MIFA
-cloud API as of 2026-08-20. Maxus vehicles are controlled via the official
-"Hi MAXUS Europe" app (package com.saicmaxus.ismarteu on Android), which is
-a SEPARATE app from MG iSMART, even though both brands belong to SAIC Motor.
+2026-09-17: found a community-maintained Dart client
+(tanguymossion/saic_ismart, MIT) whose own README states Maxus/LDV
+vehicles are controlled through the SAME protocol as MG - not a separate
+backend, despite the official consumer app being a different one ("Hi
+MAXUS Europe"). This lines up with something a real service technician
+(at the parallel-import dealer "אוטו חן") told the user the same day:
+the official Maxus app isn't available in Israel due to European
+certification/regulatory reasons - which is a distribution problem with
+THAT specific app, not evidence the vehicle's cloud connectivity itself
+is unavailable.
 
-The app id hints that it MIGHT share backend infrastructure with MG's
-tap-eu.soimt.com / gateway-eu.soimt.com (region-based host names, not
-brand-based) - but this is an unverified hypothesis, not a fact.
-
-TODO to make this real (see README.md "מיפה - הצעדים הבאים"):
-  1. Confirm the Hi MAXUS Europe app is installed and successfully paired
-     with a real MIFA 7/9 in the account we'll use.
-  2. Capture the app's network traffic during login + a remote-climate
-     action (e.g. with mitmproxy on the same Wi-Fi / a proxy profile on the
-     phone) to learn the real API host, auth flow and command payloads.
-  3. Try the existing saic-python-client-ng login flow against
-     tap-eu.soimt.com with the Maxus account credentials, in case the
-     backend really is shared - this is the fastest thing to try first,
-     before doing full traffic capture.
-  4. Once the protocol is known, implement it here the same way mg.py
-     implements MG's (either by talking to a new lightweight gateway
-     process the same way mg.py talks to MQTT, or by calling the cloud
-     API directly from this file if it turns out to be simple enough).
-
-Until then, every action just tells the caller the feature isn't ready yet,
-so the phone menu is safe to ship and test end-to-end (PIN, routing, vehicle
-selection) without pretending the car integration works.
+Working theory, not yet confirmed on a real Maxus vehicle: if a Maxus/MIFA
+owner can register their VIN through the MG iSMART app instead of the
+unavailable Maxus one (both talk to the same SAIC iSMART cloud), this
+exact adapter - unmodified - should work, since it's just MgAdapter with a
+different brand id/display name. If real-world testing shows Maxus
+needs something MG doesn't (a different tenant id, a different vehicle
+list shape, extra vehicle-type handling), that's the first thing to
+check and adjust here.
 """
 
-from .base import VehicleAdapter
+from __future__ import annotations
+
+from .mg import MgAdapter
 
 
-class MaxusAdapter(VehicleAdapter):
+class MaxusAdapter(MgAdapter):
     brand_id = "maxus"
-    display_name = "מקסוס"
-
-    def menu_prompt(self) -> str:
-        return (
-            "התמיכה ברכבי מקסוס מיפה עדיין בפיתוח, "
-            "לחץ כוכבית לחזרה לתפריט הראשי"
-        )
-
-    def handle_choice(self, choice: str):
-        # No real digit choices yet - anything typed just repeats the
-        # "not ready" message via the menu prompt above.
-        return None
+    display_name = "מקסוס / מיפה"

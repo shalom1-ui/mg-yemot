@@ -148,5 +148,5 @@ class MgAdapter(VehicleAdapter):
         except saic_client.Busy:
             return "יש עדיין פקודה קודמת בביצוע, נסו שוב בעוד כמה שניות"
         except Exception:
-            log.exception("MG action %r failed for user %s", choice, self.user.id)
-            return "אירעה שגיאה בתקשורת עם הענן של MG, נסו שוב בעוד רגע"
+            log.exception("%s action %r failed for user %s", self.brand_id, choice, self.user.id)
+            return "אירעה שגיאה בתקשורת עם הענן, נסו שוב בעוד רגע"
