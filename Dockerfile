@@ -53,11 +53,16 @@ COPY --from=gw-builder /usr/src/app/examples/ /usr/src/gateway/
 # not found). `ensurepip` is part of the Python standard library itself and
 # works fully offline, so it's a reliable way to bootstrap pip into this
 # venv before using it.
+# gmssl/numpy/pillow are for the Chery/Jaecoo/Omoda adapter (bridge/chery_client.py,
+# bridge/chery_captcha.py) added 2026-09-17: gmssl for the SM4 cipher their
+# login uses (a Chinese national standard, MG doesn't need it), numpy+pillow
+# for solving the slide-puzzle captcha their email-code request requires.
 RUN ${GATEWAY_VENV}/bin/python -m ensurepip --upgrade \
-    && ${GATEWAY_VENV}/bin/python -m pip install --no-cache-dir flask cryptography
+    && ${GATEWAY_VENV}/bin/python -m pip install --no-cache-dir \
+       flask cryptography aiohttp gmssl numpy pillow
 
 # ---- Yemot bridge ----
-COPY bridge/yemot_bridge.py bridge/store.py bridge/saic_client.py /usr/src/bridge/
+COPY bridge/yemot_bridge.py bridge/store.py bridge/saic_client.py bridge/chery_client.py bridge/chery_captcha.py /usr/src/bridge/
 COPY bridge/vehicles/ /usr/src/bridge/vehicles/
 
 # ---- Mosquitto config ----

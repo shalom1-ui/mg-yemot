@@ -5,8 +5,10 @@ folder) to onboard a future brand - nothing else in the codebase changes.
 
 from .mg import MgAdapter
 from .maxus import MaxusAdapter
+from .chery import CheryAdapter
 
 ADAPTER_CLASSES = {
     "mg": MgAdapter,
     "maxus": MaxusAdapter,
+    "chery": CheryAdapter,
 }

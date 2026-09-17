@@ -1,25 +1,32 @@
 """
-Multi-tenant user store: one row per person who has connected their own MG
+Multi-tenant user store: one row per person who has connected their own car
 account to this bridge. SQLite on a local file (a Render persistent disk in
 production - see render.yaml) since the whole dataset is tiny (a handful of
 users, not a high-write workload) and this avoids paying for/operating a
 separate database service.
 
-Car-account passwords are encrypted at rest with Fernet (symmetric,
-authenticated encryption) - unlike the single-account env-var setup this
-replaces, this file now holds OTHER PEOPLE's MG account passwords, so
-storing them in plaintext would be irresponsible even on a private disk.
-The encryption key itself lives only in the ENCRYPTION_KEY env var, never
-in the database.
+Car-account credentials are encrypted at rest with Fernet (symmetric,
+authenticated encryption) - this file holds OTHER PEOPLE's car account
+credentials, so storing them in plaintext would be irresponsible even on a
+private disk. The encryption key itself lives only in the ENCRYPTION_KEY
+env var, never in the database.
+
+Credentials are a brand-agnostic encrypted JSON blob (`credentials`), not
+named columns - added 2026-09-17 when a second brand (Chery/Jaecoo/Omoda)
+needed a completely different credential shape (email + OAuth access/
+refresh tokens + a second in-app security PIN) than MG's (email + password
++ region/base-uri/tenant-id). Each vehicle adapter defines and interprets
+its own dict shape; store.py doesn't need to know it.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cryptography.fernet import Fernet
 
@@ -36,7 +43,7 @@ def _get_fernet() -> Fernet:
         if not key:
             raise RuntimeError(
                 "ENCRYPTION_KEY is not set - required to store car-account "
-                "passwords. Generate one with: "
+                "credentials. Generate one with: "
                 "python -c \"from cryptography.fernet import Fernet; "
                 "print(Fernet.generate_key().decode())\""
             )
@@ -54,12 +61,8 @@ def _connect() -> sqlite3.Connection:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE,
             pin TEXT UNIQUE NOT NULL,
-            brand TEXT NOT NULL DEFAULT 'mg',
-            mg_email TEXT NOT NULL,
-            mg_password_enc BLOB NOT NULL,
-            saic_base_uri TEXT NOT NULL,
-            saic_region TEXT NOT NULL,
-            saic_tenant_id TEXT NOT NULL,
+            brand TEXT NOT NULL,
+            credentials_enc BLOB NOT NULL,
             vin TEXT,
             created_at REAL NOT NULL
         )
@@ -74,25 +77,18 @@ class User:
     phone: str | None
     pin: str
     brand: str
-    mg_email: str
-    mg_password: str  # decrypted
-    saic_base_uri: str
-    saic_region: str
-    saic_tenant_id: str
-    vin: str | None
+    credentials: dict = field(default_factory=dict)  # decrypted, brand-specific shape
+    vin: str | None = None
 
 
 def _row_to_user(row: sqlite3.Row) -> User:
+    creds_json = _get_fernet().decrypt(row["credentials_enc"]).decode()
     return User(
         id=row["id"],
         phone=row["phone"],
         pin=row["pin"],
         brand=row["brand"],
-        mg_email=row["mg_email"],
-        mg_password=_get_fernet().decrypt(row["mg_password_enc"]).decode(),
-        saic_base_uri=row["saic_base_uri"],
-        saic_region=row["saic_region"],
-        saic_tenant_id=row["saic_tenant_id"],
+        credentials=json.loads(creds_json),
         vin=row["vin"],
     )
 
@@ -118,24 +114,17 @@ def create_user(
     phone: str | None,
     pin: str,
     brand: str,
-    mg_email: str,
-    mg_password: str,
-    saic_base_uri: str,
-    saic_region: str,
-    saic_tenant_id: str,
+    credentials: dict,
     vin: str | None = None,
 ) -> User:
-    enc = _get_fernet().encrypt(mg_password.encode())
+    enc = _get_fernet().encrypt(json.dumps(credentials).encode())
     with _lock, _connect() as conn:
         cur = conn.execute(
             """
-            INSERT INTO users
-                (phone, pin, brand, mg_email, mg_password_enc,
-                 saic_base_uri, saic_region, saic_tenant_id, vin, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users (phone, pin, brand, credentials_enc, vin, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (phone, pin, brand, mg_email, enc, saic_base_uri, saic_region,
-             saic_tenant_id, vin, time.time()),
+            (phone, pin, brand, enc, vin, time.time()),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -145,4 +134,18 @@ def create_user(
 def set_vin(user_id: int, vin: str) -> None:
     with _lock, _connect() as conn:
         conn.execute("UPDATE users SET vin = ? WHERE id = ?", (vin, user_id))
+        conn.commit()
+
+
+def update_credentials(user_id: int, credentials: dict) -> None:
+    """
+    Overwrite a user's stored credentials. Needed for brands whose tokens
+    rotate on use (Chery/Jaecoo/Omoda's refresh_token is invalidated the
+    moment a new one is issued) - the freshly-issued value must be persisted
+    immediately, not just held in memory, or a restart before the next
+    natural refresh permanently loses access for that user.
+    """
+    enc = _get_fernet().encrypt(json.dumps(credentials).encode())
+    with _lock, _connect() as conn:
+        conn.execute("UPDATE users SET credentials_enc = ? WHERE id = ?", (enc, user_id))
         conn.commit()

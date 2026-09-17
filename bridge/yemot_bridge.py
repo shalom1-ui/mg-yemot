@@ -59,6 +59,7 @@ from flask import Flask, request, Response
 
 import store
 import saic_client
+import chery_client
 from vehicles.registry import ADAPTER_CLASSES
 
 logging.basicConfig(level=logging.INFO)
@@ -93,11 +94,13 @@ if os.environ.get("SAIC_USER") and os.environ.get("SAIC_PASSWORD"):
         phone=None,
         pin=YEMOT_PIN,
         brand="mg",
-        mg_email=os.environ["SAIC_USER"],
-        mg_password=os.environ["SAIC_PASSWORD"],
-        saic_base_uri=os.environ.get("SAIC_REST_URI", DEFAULT_SAIC_BASE_URI),
-        saic_region=os.environ.get("SAIC_REGION", DEFAULT_SAIC_REGION),
-        saic_tenant_id=os.environ.get("SAIC_TENANT_ID", DEFAULT_SAIC_TENANT_ID),
+        credentials={
+            "mg_email": os.environ["SAIC_USER"],
+            "mg_password": os.environ["SAIC_PASSWORD"],
+            "saic_base_uri": os.environ.get("SAIC_REST_URI", DEFAULT_SAIC_BASE_URI),
+            "saic_region": os.environ.get("SAIC_REGION", DEFAULT_SAIC_REGION),
+            "saic_tenant_id": os.environ.get("SAIC_TENANT_ID", DEFAULT_SAIC_TENANT_ID),
+        },
         vin=os.environ.get("MG_VEHICLE_ID") or None,
     )
 
@@ -278,17 +281,25 @@ def yemot_webhook(path_token=None):
 
 
 # ---------------------------------------------------------------------------
-# Signup - adds a new user (their own MG account + a PIN, the only thing
+# Signup - adds a new user (their own car account + a PIN, the only thing
 # that identifies them on a call - see resolve_user()'s docstring for why
 # phone number alone is deliberately not enough).
 # Not exposed over the Yemot phone flow (no practical way to type an email +
 # password on a kosher-phone keypad) - a one-time web form instead, meant to
 # be filled in from a real browser by whoever is onboarding a new person.
+#
+# MG is a single-step signup (email+password validated against the cloud
+# immediately). Chery/Jaecoo/Omoda (2026-09-17) is inherently two-step and
+# interactive - a real email must receive a one-time code before signup can
+# finish - so the form has a hidden `stage` field: stage 1 collects the
+# account details and triggers the email; stage 2 (same form, brand/phone/
+# pin/email carried as hidden fields) collects the code the user just
+# received and completes the login.
 # ---------------------------------------------------------------------------
 SIGNUP_FORM_HTML = """
 <!doctype html>
 <html lang="he" dir="rtl"><head><meta charset="utf-8">
-<title>חיבור רכב MG למערכת</title>
+<title>חיבור רכב למערכת</title>
 <style>
 body {{ font-family: system-ui, sans-serif; max-width: 32em; margin: 2em auto; padding: 0 1em; }}
 label {{ display: block; margin-top: 1em; }}
@@ -297,26 +308,87 @@ button {{ margin-top: 1.5em; padding: 0.6em 1.5em; font-size: 1em; }}
 .msg {{ margin-top: 1em; padding: 1em; border-radius: 0.3em; }}
 .ok {{ background: #e6ffed; }}
 .err {{ background: #ffe6e6; }}
+fieldset {{ margin-top: 1em; border-radius: 0.3em; }}
 </style></head><body>
-<h1>חיבור חשבון MG למערכת הטלפונית</h1>
+<h1>חיבור רכב למערכת הטלפונית</h1>
 {message}
 <form method="post">
+<label>מותג הרכב:
+<select name="brand" required onchange="
+document.getElementById('mg-fields').hidden = this.value !== 'mg';
+document.getElementById('chery-fields').hidden = this.value !== 'chery';
+">
+<option value="">- בחר/י -</option>
+<option value="mg" {mg_selected}>MG</option>
+<option value="chery" {chery_selected}>צ'רי / ג'קו / אומודה (Chery/Jaecoo/Omoda)</option>
+</select></label>
 <label>מספר טלפון (אופציונלי, לתיעוד בלבד - הזיהוי בשיחה הוא תמיד לפי הקוד הסודי):
-<input name="phone" placeholder="0501234567"></label>
-<label>קוד סודי בן 4 ספרות (חובה):
-<input name="pin" required pattern="[0-9]{{4}}" maxlength="4"></label>
-<label>אימייל של חשבון ה-iSMART:
-<input name="mg_email" type="email" required></label>
-<label>סיסמת חשבון ה-iSMART:
-<input name="mg_password" type="password" required></label>
+<input name="phone" placeholder="0501234567" value="{phone}"></label>
+<label>קוד סודי בן 4 ספרות לשיחות הטלפון (חובה):
+<input name="pin" required pattern="[0-9]{{4}}" maxlength="4" value="{pin}"></label>
+
+<fieldset id="mg-fields" hidden>
+<legend>פרטי חשבון MG iSMART</legend>
+<label>אימייל:
+<input name="mg_email" type="email"></label>
+<label>סיסמה:
+<input name="mg_password" type="password"></label>
 <label>אזור (ברירת מחדל מתאימה לישראל):
 <input name="saic_region" value="{default_region}"></label>
 <label>כתובת שרת (ברירת מחדל מתאימה לישראל):
 <input name="saic_base_uri" value="{default_base_uri}"></label>
-<button type="submit">התחבר ובדוק</button>
+</fieldset>
+
+<fieldset id="chery-fields" hidden>
+<legend>פרטי חשבון Chery/Jaecoo/Omoda</legend>
+<label>אימייל:
+<input name="chery_email" type="email" value="{chery_email}"></label>
+<label>קוד PIN הפנימי של אפליקציית הרכב (משמש לאישור כל פקודה):
+<input name="chery_account_pin" value="{chery_account_pin}"></label>
+{code_field}
+</fieldset>
+
+<input type="hidden" name="stage" value="{stage}">
+<button type="submit">{submit_label}</button>
 </form>
 </body></html>
 """
+
+def _signup_render(
+    message: str = "", ok: bool = True, *, phone: str = "", pin: str = "",
+    brand: str = "", chery_email: str = "", chery_account_pin: str = "",
+    stage: str = "1", submit_label: str = "התחבר ובדוק", status: int = 200,
+) -> Response:
+    code_field = ""
+    if stage == "2":
+        code_field = (
+            '<label>הקוד שקיבלת עכשיו באימייל:'
+            '<input name="code" required autofocus></label>'
+        )
+    return Response(
+        SIGNUP_FORM_HTML.format(
+            message=f'<div class="msg {"ok" if ok else "err"}">{message}</div>' if message else "",
+            mg_selected="selected" if brand == "mg" else "",
+            chery_selected="selected" if brand == "chery" else "",
+            phone=phone, pin=pin,
+            default_region=DEFAULT_SAIC_REGION, default_base_uri=DEFAULT_SAIC_BASE_URI,
+            chery_email=chery_email, chery_account_pin=chery_account_pin,
+            code_field=code_field, stage=stage, submit_label=submit_label,
+        ),
+        status=status, mimetype="text/html; charset=utf-8",
+    )
+
+
+def _finish_signup(*, phone, pin, brand, credentials, vin) -> Response:
+    try:
+        user = store.create_user(phone=phone, pin=pin, brand=brand, credentials=credentials, vin=vin)
+    except sqlite3.IntegrityError:
+        return _signup_render(
+            "קוד סודי או מספר טלפון כבר קיימים במערכת", ok=False, status=400,
+            phone=phone or "", pin=pin, brand=brand,
+        )
+    return _signup_render(f"נוצר בהצלחה! משתמש מספר {user.id}, רכב {vin}", ok=True)
+
 
 @app.route("/signup/<token>", methods=["GET", "POST"])
 def signup(token):
@@ -324,60 +396,100 @@ def signup(token):
         return Response("Not found", status=404)
 
     if request.method == "GET":
-        return Response(
-            SIGNUP_FORM_HTML.format(message="", default_region=DEFAULT_SAIC_REGION,
-                                     default_base_uri=DEFAULT_SAIC_BASE_URI),
-            mimetype="text/html; charset=utf-8",
-        )
+        return _signup_render()
 
     phone = request.form.get("phone", "").strip() or None
     pin = request.form.get("pin", "").strip()
-    mg_email = request.form.get("mg_email", "").strip()
-    mg_password = request.form.get("mg_password", "")
-    saic_base_uri = request.form.get("saic_base_uri", "").strip() or DEFAULT_SAIC_BASE_URI
-    saic_region = request.form.get("saic_region", "").strip() or DEFAULT_SAIC_REGION
+    brand = request.form.get("brand", "").strip()
+    stage = request.form.get("stage", "1").strip()
 
-    def render(message: str, ok: bool, status: int = 200):
-        css = "ok" if ok else "err"
-        return Response(
-            SIGNUP_FORM_HTML.format(
-                message=f'<div class="msg {css}">{message}</div>',
-                default_region=DEFAULT_SAIC_REGION, default_base_uri=DEFAULT_SAIC_BASE_URI,
-            ),
-            status=status, mimetype="text/html; charset=utf-8",
-        )
+    if not (pin and brand):
+        return _signup_render("חסרים שדות חובה (קוד סודי, מותג)", ok=False, status=400,
+                               phone=phone or "", pin=pin, brand=brand)
 
-    if not (pin and mg_email and mg_password):
-        return render("חסרים שדות חובה (קוד סודי, אימייל, סיסמה)", ok=False, status=400)
+    # ---- MG: single step, validated immediately against the real cloud ----
+    if brand == "mg":
+        mg_email = request.form.get("mg_email", "").strip()
+        mg_password = request.form.get("mg_password", "")
+        saic_base_uri = request.form.get("saic_base_uri", "").strip() or DEFAULT_SAIC_BASE_URI
+        saic_region = request.form.get("saic_region", "").strip() or DEFAULT_SAIC_REGION
 
-    # A throwaway user record, not saved yet: validate the credentials
-    # against MG's real cloud before writing anything, so a typo is caught
-    # here instead of silently failing on the caller's first real phone call.
-    temp_user = store.User(
-        id=0, phone=phone, pin=pin, brand="mg",
-        mg_email=mg_email, mg_password=mg_password,
-        saic_base_uri=saic_base_uri, saic_region=saic_region,
-        saic_tenant_id=DEFAULT_SAIC_TENANT_ID, vin=None,
-    )
-    try:
-        client = saic_client.validate_credentials(temp_user)
-        vehicle_list = saic_client.run_async(client.vehicle_list())
-        vin = vehicle_list.vinList[0].vin
-    except Exception as e:
-        log.exception("Signup login failed for %s", mg_email)
-        return render(f"ההתחברות לחשבון MG נכשלה: {e}", ok=False, status=400)
+        if not (mg_email and mg_password):
+            return _signup_render("חסרים שדות חובה (אימייל, סיסמה)", ok=False, status=400,
+                                   phone=phone or "", pin=pin, brand=brand)
 
-    try:
-        user = store.create_user(
-            phone=phone, pin=pin, brand="mg",
-            mg_email=mg_email, mg_password=mg_password,
-            saic_base_uri=saic_base_uri, saic_region=saic_region,
-            saic_tenant_id=DEFAULT_SAIC_TENANT_ID, vin=vin,
-        )
-    except sqlite3.IntegrityError:
-        return render("קוד סודי או מספר טלפון כבר קיימים במערכת", ok=False, status=400)
+        credentials = {
+            "mg_email": mg_email, "mg_password": mg_password,
+            "saic_base_uri": saic_base_uri, "saic_region": saic_region,
+            "saic_tenant_id": DEFAULT_SAIC_TENANT_ID,
+        }
+        # A throwaway user record, not saved yet: validate the credentials
+        # against MG's real cloud before writing anything, so a typo is
+        # caught here instead of silently failing on the first real call.
+        temp_user = store.User(id=0, phone=phone, pin=pin, brand="mg", credentials=credentials)
+        try:
+            client = saic_client.validate_credentials(temp_user)
+            vehicle_list = saic_client.run_async(client.vehicle_list())
+            vin = vehicle_list.vinList[0].vin
+        except Exception as e:
+            log.exception("Signup login failed for %s", mg_email)
+            return _signup_render(f"ההתחברות לחשבון MG נכשלה: {e}", ok=False, status=400,
+                                   phone=phone or "", pin=pin, brand=brand)
+        return _finish_signup(phone=phone, pin=pin, brand="mg", credentials=credentials, vin=vin)
 
-    return render(f"נוצר בהצלחה! משתמש מספר {user.id}, רכב {vin}", ok=True)
+    # ---- Chery/Jaecoo/Omoda: two steps (request email code, then use it) ----
+    if brand == "chery":
+        chery_email = request.form.get("chery_email", "").strip()
+        chery_account_pin = request.form.get("chery_account_pin", "").strip()
+
+        if not (chery_email and chery_account_pin):
+            return _signup_render("חסרים שדות חובה (אימייל, קוד PIN של הרכב)", ok=False, status=400,
+                                   phone=phone or "", pin=pin, brand=brand)
+
+        if stage != "2":
+            # Stage 1: solve the captcha and ask the cloud to email a code.
+            try:
+                client = chery_client.new_standalone_client()
+                chery_client.run_async(client.request_email_code(chery_email), timeout=30.0)
+            except Exception as e:
+                log.exception("Chery signup code request failed for %s", chery_email)
+                return _signup_render(f"שליחת קוד האימות נכשלה: {e}", ok=False, status=400,
+                                       phone=phone or "", pin=pin, brand=brand)
+            return _signup_render(
+                "קוד אימות נשלח לאימייל - הזן/י אותו למטה", ok=True,
+                phone=phone or "", pin=pin, brand=brand, chery_email=chery_email,
+                chery_account_pin=chery_account_pin, stage="2", submit_label="סיים הרשמה",
+            )
+
+        # Stage 2: use the code the caller just received.
+        code = request.form.get("code", "").strip()
+        if not code:
+            return _signup_render(
+                "חסר קוד האימות מהאימייל", ok=False, status=400,
+                phone=phone or "", pin=pin, brand=brand, chery_email=chery_email,
+                chery_account_pin=chery_account_pin, stage="2", submit_label="סיים הרשמה",
+            )
+        try:
+            client = chery_client.new_standalone_client()
+            chery_client.run_async(client.login(chery_email, code), timeout=30.0)
+            chery_client.run_async(client.tsp_login(), timeout=30.0)
+            vehicles = chery_client.run_async(client.get_vehicle_list(), timeout=30.0)
+            vin = vehicles[0]["vin"]
+        except Exception as e:
+            log.exception("Chery signup login failed for %s", chery_email)
+            return _signup_render(
+                f"ההתחברות נכשלה: {e}", ok=False, status=400,
+                phone=phone or "", pin=pin, brand=brand, chery_email=chery_email,
+                chery_account_pin=chery_account_pin, stage="2", submit_label="סיים הרשמה",
+            )
+
+        credentials = {
+            "chery_email": chery_email, "chery_account_pin": chery_account_pin,
+            "chery_refresh_token": client.session.refresh_token,
+        }
+        return _finish_signup(phone=phone, pin=pin, brand="chery", credentials=credentials, vin=vin)
+
+    return _signup_render("מותג לא מוכר", ok=False, status=400, phone=phone or "", pin=pin)
 
 
 @app.route("/health")

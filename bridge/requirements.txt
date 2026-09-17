@@ -1,3 +1,7 @@
 flask==3.0.3
 saic-ismart-client-ng>=0.9.3,<0.10.0
 cryptography
+aiohttp
+gmssl
+numpy
+pillow

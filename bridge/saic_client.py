@@ -92,18 +92,21 @@ def run_async(coro: Awaitable[T], timeout: float = 20.0) -> T:
         raise
 
 
+def _config_from_credentials(creds: dict) -> SaicApiConfiguration:
+    return SaicApiConfiguration(
+        username=creds["mg_email"],
+        password=creds["mg_password"],
+        base_uri=creds["saic_base_uri"],
+        region=creds["saic_region"],
+        tenant_id=creds["saic_tenant_id"],
+    )
+
+
 def _get_client(user: store.User) -> SaicApi:
     with _state_lock:
         client = _clients.get(user.id)
         if client is None:
-            config = SaicApiConfiguration(
-                username=user.mg_email,
-                password=user.mg_password,
-                base_uri=user.saic_base_uri,
-                region=user.saic_region,
-                tenant_id=user.saic_tenant_id,
-            )
-            client = SaicApi(config)
+            client = SaicApi(_config_from_credentials(user.credentials))
             _clients[user.id] = client
         return client
 
@@ -117,14 +120,7 @@ def validate_credentials(user: store.User) -> SaicApi:
     collide with the legacy env-var account's real id (also 0), wiping out
     its live cached session every time someone fills in the signup form.
     """
-    config = SaicApiConfiguration(
-        username=user.mg_email,
-        password=user.mg_password,
-        base_uri=user.saic_base_uri,
-        region=user.saic_region,
-        tenant_id=user.saic_tenant_id,
-    )
-    client = SaicApi(config)
+    client = SaicApi(_config_from_credentials(user.credentials))
     run_async(client.login())
     return client
 
