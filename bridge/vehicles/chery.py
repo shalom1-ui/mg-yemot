@@ -54,6 +54,14 @@ class CheryAdapter(VehicleAdapter):
         self._enqueue("unlock")
         return "הפקודה לפתיחת הדלתות נשלחה"
 
+    def _action_trunk(self):
+        self._enqueue("trunk")
+        return "הפקודה לפתיחת דלת המטען נשלחה"
+
+    def _action_find_car(self):
+        self._enqueue("find_car")
+        return "הרכב יצפצף ויהבהב באורות לאיתור"
+
     def _action_seat_heat_on(self):
         self._enqueue("seat_heat_on")
         return "הפקודה להדלקת חימום מושבים נשלחה"
@@ -66,31 +74,31 @@ class CheryAdapter(VehicleAdapter):
         self._enqueue("front_defrost")
         return "הפקודה להפשרת השמשה הקדמית נשלחה"
 
-    def _action_find_car(self):
-        self._enqueue("find_car")
-        return "הרכב יצפצף ויהבהב באורות לאיתור"
-
+    # Fixed 2-digit codes (2026-09-18), same convention as MG - see
+    # base.py's menu_prompt() docstring for why (no submenu, no "#").
     _MENU = {
-        "1": _action_ac_on,
-        "2": _action_ac_off,
-        "3": _action_lock,
-        "4": _action_unlock,
-        "6": _action_find_car,
-        "7": _action_seat_heat_on,
-        "8": _action_seat_heat_off,
-        "9": _action_front_defrost,
+        "01": _action_ac_on,
+        "02": _action_ac_off,
+        "03": _action_lock,
+        "04": _action_unlock,
+        "05": _action_trunk,
+        "06": _action_find_car,
+        "07": _action_seat_heat_on,
+        "08": _action_seat_heat_off,
+        "09": _action_front_defrost,
     }
 
     def menu_prompt(self) -> str:
         return (
-            "לחץ אחת להדלקת מזגן, "
-            "לחץ שתיים לכיבוי מזגן, "
-            "לחץ שלוש לנעילת דלתות, "
-            "לחץ ארבע לפתיחת דלתות, "
-            "לחץ שש לצפצוף ואיתור הרכב, "
-            "לחץ שבע להדלקת חימום מושבים, "
-            "לחץ שמונה לכיבוי חימום מושבים, "
-            "לחץ תשע להפשרת השמשה הקדמית, "
+            "לחץ אפס אחת להדלקת מזגן, "
+            "לחץ אפס שתיים לכיבוי מזגן, "
+            "לחץ אפס שלוש לנעילת דלתות, "
+            "לחץ אפס ארבע לפתיחת דלתות, "
+            "לחץ אפס חמש לפתיחת דלת המטען, "
+            "לחץ אפס שש לצפצוף ואיתור הרכב, "
+            "לחץ אפס שבע להדלקת חימום מושבים, "
+            "לחץ אפס שמונה לכיבוי חימום מושבים, "
+            "לחץ אפס תשע להפשרת השמשה הקדמית, "
             "לחץ כוכבית לסיום"
         )
 

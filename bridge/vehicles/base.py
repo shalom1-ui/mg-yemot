@@ -33,15 +33,26 @@ class VehicleAdapter(ABC):
 
     @abstractmethod
     def menu_prompt(self) -> str:
-        """Hebrew text listing the available digit choices for this vehicle."""
+        """Hebrew text listing the available two-digit choices for this
+        vehicle. Fixed 2-digit codes (2026-09-18, e.g. "01".."11"), not a
+        single digit: this brand has more actions than fit one-per-key on
+        a phone keypad, and the two alternatives considered - a "more
+        options" submenu, and using "#" as a value/level separator - were
+        both dropped: a submenu costs an extra key press for anything not
+        on the main page, and "#" is a reserved key in Yemot's own
+        protocol (system message M1120, found earlier this project) that
+        broke calls outright the last time it came up. A fixed digit
+        count reuses the exact same proven read= mechanism as the 4-digit
+        PIN (see yemot_bridge.py's read_digits()), just with 2 digits
+        instead of 1 - no new protocol behavior, only a different count."""
         raise NotImplementedError
 
     @abstractmethod
     def handle_choice(self, choice: str) -> str | None:
         """
-        Run the action for `choice` (a single digit string).
+        Run the action for `choice` (a two-digit string, e.g. "01").
         Returns the Hebrew text to read back to the caller, or None if the
-        digit isn't a valid choice for this vehicle (caller will be
+        code isn't a valid choice for this vehicle (caller will be
         re-prompted).
         """
         raise NotImplementedError

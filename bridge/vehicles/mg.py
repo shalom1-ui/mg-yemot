@@ -58,6 +58,10 @@ class MgAdapter(VehicleAdapter):
         saic_client.enqueue(self.user, lambda api: api.stop_ac(self.vin))
         return "הפקודה לכיבוי המזגן נשלחה"
 
+    def _action_ac_blowing(self):
+        saic_client.enqueue(self.user, lambda api: api.start_ac_blowing(self.vin))
+        return "הפקודה להפעלת אוורור בלבד (בלי קירור) נשלחה"
+
     def _action_seat_heat_on(self):
         saic_client.enqueue(self.user, lambda api: api.control_heated_seats(
             self.vin, left_side_level=3, right_side_level=3))
@@ -71,6 +75,10 @@ class MgAdapter(VehicleAdapter):
     def _action_front_defrost(self):
         saic_client.enqueue(self.user, lambda api: api.start_front_defrost(self.vin))
         return "הפקודה להפשרת השמשה הקדמית נשלחה"
+
+    def _action_trunk(self):
+        saic_client.enqueue(self.user, lambda api: api.open_tailgate(self.vin))
+        return "הפקודה לפתיחת דלת המטען נשלחה"
 
     def _action_lock(self):
         saic_client.enqueue(self.user, lambda api: api.lock_vehicle(self.vin))
@@ -109,16 +117,21 @@ class MgAdapter(VehicleAdapter):
 
         return ", ".join(parts)
 
+    # -- menu ------------------------------------------------------------
+    # Fixed 2-digit codes (2026-09-18) - see base.py's menu_prompt()
+    # docstring for why (no submenu, no "#").
     _MENU = {
-        "1": _action_ac_on,
-        "2": _action_ac_off,
-        "3": _action_lock,
-        "4": _action_unlock,
-        "5": _action_status,
-        "6": _action_find_car,
-        "7": _action_seat_heat_on,
-        "8": _action_seat_heat_off,
-        "9": _action_front_defrost,
+        "01": _action_ac_on,
+        "02": _action_ac_off,
+        "03": _action_lock,
+        "04": _action_unlock,
+        "05": _action_status,
+        "06": _action_find_car,
+        "07": _action_seat_heat_on,
+        "08": _action_seat_heat_off,
+        "09": _action_front_defrost,
+        "10": _action_trunk,
+        "11": _action_ac_blowing,
     }
 
     def menu_prompt(self) -> str:
@@ -127,15 +140,17 @@ class MgAdapter(VehicleAdapter):
         # bare space by clean() (no TTS pause at all); commas survive and
         # give the speech engine a natural pause between menu options.
         return (
-            "לחץ אחת להדלקת מזגן, "
-            "לחץ שתיים לכיבוי מזגן, "
-            "לחץ שלוש לנעילת דלתות, "
-            "לחץ ארבע לפתיחת דלתות, "
-            "לחץ חמש לשמיעת סטטוס הרכב, "
-            "לחץ שש לצפצוף ואיתור הרכב, "
-            "לחץ שבע להדלקת חימום מושבים, "
-            "לחץ שמונה לכיבוי חימום מושבים, "
-            "לחץ תשע להפשרת השמשה הקדמית, "
+            "לחץ אפס אחת להדלקת מזגן, "
+            "לחץ אפס שתיים לכיבוי מזגן, "
+            "לחץ אפס שלוש לנעילת דלתות, "
+            "לחץ אפס ארבע לפתיחת דלתות, "
+            "לחץ אפס חמש לשמיעת סטטוס הרכב, "
+            "לחץ אפס שש לצפצוף ואיתור הרכב, "
+            "לחץ אפס שבע להדלקת חימום מושבים, "
+            "לחץ אפס שמונה לכיבוי חימום מושבים, "
+            "לחץ אפס תשע להפשרת השמשה הקדמית, "
+            "לחץ אחת אפס לפתיחת דלת המטען, "
+            "לחץ אחת אחת להפעלת אוורור בלבד, "
             "לחץ כוכבית לסיום"
         )
 

@@ -173,6 +173,8 @@ call_user = {}   # call_id -> store.User, once identified for this call
 call_round = {}  # call_id -> int, see next_choice_var() below
 _last_seen = {}  # call_id -> timestamp, for TTL cleanup below
 CALL_TTL_SECONDS = 30 * 60
+MENU_DIGITS = 2  # fixed 2-digit action codes ("01".."11") - see
+                 # vehicles/base.py's menu_prompt() docstring for why.
 
 def touch_call(call_id: str):
     _last_seen[call_id] = time.time()
@@ -251,11 +253,16 @@ def yemot_webhook(path_token=None):
         touch_call(call_id)
         call_user[call_id] = user
         adapter = get_adapter(user)
-        return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), 1))
+        return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), MENU_DIGITS))
 
     touch_call(call_id)
 
-    # Step 2: action choice within the already-identified user's vehicle
+    # Step 2: action choice within the already-identified user's vehicle.
+    # Menu codes are a fixed 2 digits (MENU_DIGITS) - so a lone "0" can't
+    # be submitted by itself (Yemot waits for the 2nd digit), hence "00"
+    # for repeat instead of the single "0" used back when the menu was
+    # 1 digit. "*" still works as a single press - it's not a digit, so
+    # Yemot doesn't hold it back waiting for a second one.
     user = call_user[call_id]
     adapter = get_adapter(user)
     choice = params.get(f"car_choice_{call_round.get(call_id, 1) - 1}", "")
@@ -263,10 +270,10 @@ def yemot_webhook(path_token=None):
     if choice == "*":
         return yemot_response(id_list_message_hangup("להתראות."))
 
-    if choice == "0":
+    if choice == "00":
         # replay the menu, no "invalid choice" framing - this is a
         # deliberate "hear the options again / do another action" key.
-        return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), 1))
+        return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), MENU_DIGITS))
 
     try:
         result_text = adapter.handle_choice(choice)
@@ -275,9 +282,9 @@ def yemot_webhook(path_token=None):
         result_text = "אירעה שגיאה בביצוע הפעולה."
 
     if result_text is None:
-        return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), 1, "בחירה לא תקינה."))
+        return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), MENU_DIGITS, "בחירה לא תקינה."))
 
-    return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), 1, result_text))
+    return yemot_response(read_digits(adapter.menu_prompt(), next_choice_var(call_id), MENU_DIGITS, result_text))
 
 
 # ---------------------------------------------------------------------------

@@ -206,6 +206,10 @@ def _front_windshield_body(on: bool) -> dict[str, str]:
     return body
 
 
+def _liftgate_body(open_: bool) -> dict[str, str]:
+    return {"controlType": "1" if open_ else "0"}
+
+
 COMMAND_SPECS: dict[str, tuple[str, Callable[[], dict[str, Any]]]] = {
     "ac_on": ("airControl", lambda: _air_control_body(True)),
     "ac_off": ("airControl", lambda: _air_control_body(False)),
@@ -215,6 +219,7 @@ COMMAND_SPECS: dict[str, tuple[str, Callable[[], dict[str, Any]]]] = {
     "seat_heat_off": ("seatControl", lambda: _seat_control_body(False)),
     "front_defrost": ("frontWindshieldControl", lambda: _front_windshield_body(True)),
     "find_car": ("findCar", lambda: {}),
+    "trunk": ("powerLiftgateControl", lambda: _liftgate_body(True)),
 }
 
 
