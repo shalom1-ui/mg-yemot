@@ -67,14 +67,26 @@ class MgAdapter(VehicleAdapter):
             )
             basic = status.basicVehicleStatus
             status_time = status.statusTime
-            fresh = (
-                status_time is not None
-                and status_time not in self._STATUS_TIME_INVALID
-                and abs(time.time() - status_time) <= self._STATUS_MAX_AGE
-            )
+            valid_time = status_time is not None and status_time not in self._STATUS_TIME_INVALID
+            age = abs(time.time() - status_time) if valid_time else None
+            fresh = age is not None and age <= self._STATUS_MAX_AGE
             running = bool(basic and basic.is_engine_running and fresh)
-        except Exception:
-            log.info("Could not check engine state for user %s, assuming not running", self.user.id)
+            # Raw values on purpose: engineStatus is the only field the
+            # upstream gateway trusts for "running", but nobody has confirmed
+            # it flips for a PHEV that's switched on in EV mode - if a
+            # real "car was on but we said nothing" report comes in, this
+            # line is what shows which field (if any) actually changed.
+            log.info(
+                "engine check user=%s engineStatus=%s powerMode=%s canBusActive=%s "
+                "handBrake=%s statusAgeSec=%s fresh=%s -> running=%s",
+                self.user.id,
+                getattr(basic, "engineStatus", None), getattr(basic, "powerMode", None),
+                getattr(basic, "canBusActive", None), getattr(basic, "handBrake", None),
+                None if age is None else int(age), fresh, running,
+            )
+        except Exception as e:
+            log.info("Could not check engine state for user %s (%s: %s), assuming not running",
+                     self.user.id, type(e).__name__, e)
         self._running_cache = (time.time(), running)
         return running
 
