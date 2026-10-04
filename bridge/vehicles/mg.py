@@ -39,6 +39,45 @@ class MgAdapter(VehicleAdapter):
             self.user.vin = vin
         return self.user.vin
 
+    # -- "is the car running?" guard ---------------------------------------
+    # Remote commands don't go through while the engine is on (MG's own
+    # rejections even say "restart the vehicle with the physical key... turn
+    # off the engine"), and because every action here is fire-and-forget the
+    # caller would otherwise hear "command sent" and never learn it was
+    # dropped. So before sending anything, ask the cloud for the engine state
+    # (cached briefly so a burst of key presses costs one lookup) and say so
+    # out loud instead. Fails OPEN: if the lookup errors, times out, is
+    # blocked behind another command, or the cloud's status looks stale, we
+    # return "not running" and let the command through - a flaky pre-check
+    # must never be what stops a working command.
+    _RUNNING_CACHE_TTL = 20.0
+    _STATUS_MAX_AGE = 15 * 60  # same drift limit the upstream gateway enforces
+    _STATUS_TIME_INVALID = frozenset({0, 2147483647})
+    _running_cache: tuple[float, bool] | None = None
+
+    def _vehicle_running(self) -> bool:
+        cached = self._running_cache
+        if cached and time.time() - cached[0] < self._RUNNING_CACHE_TTL:
+            return cached[1]
+        running = False
+        try:
+            status = saic_client.call(
+                self.user, lambda api: api.get_vehicle_status(self.vin),
+                wait_for_lock=2.0, action_timeout=5.0, quick=True,
+            )
+            basic = status.basicVehicleStatus
+            status_time = status.statusTime
+            fresh = (
+                status_time is not None
+                and status_time not in self._STATUS_TIME_INVALID
+                and abs(time.time() - status_time) <= self._STATUS_MAX_AGE
+            )
+            running = bool(basic and basic.is_engine_running and fresh)
+        except Exception:
+            log.info("Could not check engine state for user %s, assuming not running", self.user.id)
+        self._running_cache = (time.time(), running)
+        return running
+
     # -- actions -------------------------------------------------------
     # Every command below is fire-and-forget (saic_client.enqueue), not
     # just AC-on: live testing found unlock alone could take 12s, then
@@ -110,6 +149,8 @@ class MgAdapter(VehicleAdapter):
         if basic and basic.lockStatus is not None:
             locked_txt = "נעולה" if basic.lockStatus == 1 else "לא נעולה"
             parts.append(f"הרכב {locked_txt}")
+        if basic and basic.is_engine_running:
+            parts.append("הרכב מונע")
         if status.gpsPosition is not None:
             parts.append("יש נתון מיקום עדכני לרכב")
         if not parts:
@@ -154,10 +195,15 @@ class MgAdapter(VehicleAdapter):
             "לחץ כוכבית לסיום"
         )
 
+    # Choices that only READ state (status) are allowed while the car runs.
+    _READ_ONLY_CHOICES = frozenset({"05"})
+
     def handle_choice(self, choice: str):
         action = self._MENU.get(choice)
         if not action:
             return None
+        if choice not in self._READ_ONLY_CHOICES and self._vehicle_running():
+            return "הרכב מונע כרגע ולכן אי אפשר לשלוח פקודות מרחוק, כבו את הרכב ונסו שוב"
         try:
             return action(self)
         except saic_client.Busy:

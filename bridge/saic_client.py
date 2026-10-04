@@ -130,6 +130,7 @@ def call(
     action: Callable[[SaicApi], Awaitable[T]],
     wait_for_lock: float = 5.0,
     action_timeout: float = 12.0,
+    quick: bool = False,
 ) -> T:
     """
     Run one authenticated SaicApi call for this user: logs in first if this
@@ -202,6 +203,12 @@ def call(
             log.warning("SaicApi rejected call for user %s: %s", user.id, e)
             raise
         except Exception as e:
+            if quick:
+                # Best-effort pre-checks (e.g. "is the car running?") must
+                # never stall the phone call on the login+retry dance below
+                # - just give up and let the caller decide what unknown means.
+                log.info("SaicApi quick call failed for user %s (%s: %s)", user.id, type(e).__name__, e)
+                raise
             log.warning(
                 "SaicApi call failed for user %s (%s: %s), retrying after re-login",
                 user.id, type(e).__name__, e,
