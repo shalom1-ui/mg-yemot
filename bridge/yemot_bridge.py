@@ -398,6 +398,14 @@ def _finish_signup(*, phone, pin, brand, credentials, vin) -> Response:
             "קוד סודי או מספר טלפון כבר קיימים במערכת", ok=False, status=400,
             phone=phone or "", pin=pin, brand=brand,
         )
+    except Exception as e:
+        # Anything else here (unwritable disk, ...) used to surface as a bare
+        # Flask 500 AFTER the cloud login had already succeeded.
+        log.exception("Saving new user failed (brand=%s)", brand)
+        return _signup_render(
+            f"ההתחברות לרכב הצליחה אבל השמירה במערכת נכשלה: {type(e).__name__}: {e}",
+            ok=False, status=500, phone=phone or "", pin=pin, brand=brand,
+        )
     return _signup_render(f"נוצר בהצלחה! משתמש מספר {user.id}, רכב {vin}", ok=True)
 
 
@@ -405,6 +413,19 @@ def _finish_signup(*, phone, pin, brand, credentials, vin) -> Response:
 def signup(token):
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
         return Response("Not found", status=404)
+
+    # Check the encryption key BEFORE touching anyone's car credentials: a
+    # missing/malformed ENCRYPTION_KEY only blows up at save time, i.e. after
+    # a successful (and rate-limited) cloud login.
+    key_problem = store.encryption_error()
+    if key_problem:
+        log.error("Signup refused, ENCRYPTION_KEY unusable: %s", key_problem)
+        return _signup_render(
+            "ההרשמה לא יכולה לשמור משתמשים: המשתנה ENCRYPTION_KEY בהגדרות השרת (Render) "
+            "חסר או לא תקין. הוא חייב להיות מפתח Fernet - 44 תווים שנגמרים בסימן =. "
+            f"פרטי החשבון לא נשלחו לשום מקום. ({key_problem})",
+            ok=False, status=500,
+        )
 
     if request.method == "GET":
         return _signup_render()
@@ -508,7 +529,9 @@ def signup(token):
 
 @app.route("/health")
 def health():
-    return {"ok": True}
+    # encryption_ok: whether ENCRYPTION_KEY is a usable Fernet key (needed to
+    # add/read non-legacy users). Boolean only - never the key or the reason.
+    return {"ok": True, "encryption_ok": store.encryption_error() is None}
 
 
 if __name__ == "__main__":

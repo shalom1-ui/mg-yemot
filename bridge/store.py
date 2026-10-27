@@ -51,6 +51,17 @@ def _get_fernet() -> Fernet:
     return _fernet
 
 
+def encryption_error() -> str | None:
+    """None if ENCRYPTION_KEY is usable, else a short reason. Lets the signup
+    page refuse up front (before the person's car password goes anywhere)
+    instead of failing with a bare 500 only after the cloud login succeeded."""
+    try:
+        _get_fernet()
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
 def _connect() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
