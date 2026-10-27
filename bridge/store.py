@@ -62,23 +62,71 @@ def encryption_error() -> str | None:
         return f"{type(e).__name__}: {e}"
 
 
+_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT UNIQUE,
+        pin TEXT UNIQUE NOT NULL,
+        brand TEXT NOT NULL,
+        credentials_enc BLOB NOT NULL,
+        vin TEXT,
+        created_at REAL NOT NULL
+    )
+"""
+
+
+def _migrate_v1_schema(conn: sqlite3.Connection) -> None:
+    """
+    The first multi-tenant deploy created `users` with MG-specific columns
+    (mg_email, mg_password_enc, saic_*). `CREATE TABLE IF NOT EXISTS` never
+    alters an existing table, so on a persistent disk that already holds the
+    old table every INSERT failed with "no column named credentials_enc"
+    (found 2026-10-27 on the first real signup). Convert in place: rows are
+    decrypted/re-packed BEFORE any DDL runs, so a bad ENCRYPTION_KEY aborts
+    with nothing changed; the table swap itself is one transaction.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+    if not cols or "credentials_enc" in cols or "mg_password_enc" not in cols:
+        return
+    converted = []
+    old_rows = conn.execute("SELECT * FROM users").fetchall()
+    if old_rows:
+        f = _get_fernet()
+        for row in old_rows:
+            creds = {
+                "mg_email": row["mg_email"],
+                "mg_password": f.decrypt(row["mg_password_enc"]).decode(),
+                "saic_base_uri": row["saic_base_uri"],
+                "saic_region": row["saic_region"],
+                "saic_tenant_id": row["saic_tenant_id"],
+            }
+            converted.append((
+                row["id"], row["phone"], row["pin"], row["brand"] or "mg",
+                f.encrypt(json.dumps(creds).encode()), row["vin"], row["created_at"],
+            ))
+    conn.commit()
+    conn.execute("BEGIN")
+    try:
+        conn.execute("ALTER TABLE users RENAME TO users_v1_old")
+        conn.execute(_SCHEMA)
+        conn.executemany(
+            "INSERT INTO users (id, phone, pin, brand, credentials_enc, vin, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            converted,
+        )
+        conn.execute("DROP TABLE users_v1_old")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _connect() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT UNIQUE,
-            pin TEXT UNIQUE NOT NULL,
-            brand TEXT NOT NULL,
-            credentials_enc BLOB NOT NULL,
-            vin TEXT,
-            created_at REAL NOT NULL
-        )
-        """
-    )
+    _migrate_v1_schema(conn)
+    conn.execute(_SCHEMA)
     return conn
 
 
