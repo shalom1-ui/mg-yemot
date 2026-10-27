@@ -105,6 +105,29 @@ class MgAdapter(VehicleAdapter):
         saic_client.enqueue(self.user, lambda api: api.start_ac(self.vin))
         return "הפקודה להדלקת המזגן נשלחה, הרכב אמור להגיב תוך דקה עד שתיים"
 
+    # AC-on at a chosen temperature: the keypad code IS the temperature in
+    # degrees (16-28), so "22" = AC on at 22 C. SaicApi.start_ac takes a
+    # temperature_idx, not degrees; the upstream saic-python-mqtt-gateway maps
+    # it as idx = 2 + temp - min_temp (3 + temp - 17 for series EH32), which
+    # collapses to temp - 14 for every series it knows, and matches the
+    # library's own default (idx 8 = 22 C). The S9's series isn't known, so
+    # the exact degree offset is unverified on a real car.
+    _AC_TEMP_MIN = 16
+    _AC_TEMP_MAX = 28
+    _AC_TEMP_IDX_OFFSET = 14
+
+    def _ac_temp_for(self, choice: str) -> int | None:
+        if len(choice) == 2 and choice.isdigit():
+            temp = int(choice)
+            if self._AC_TEMP_MIN <= temp <= self._AC_TEMP_MAX:
+                return temp
+        return None
+
+    def _action_ac_on_temp(self, temp: int):
+        idx = temp - self._AC_TEMP_IDX_OFFSET
+        saic_client.enqueue(self.user, lambda api: api.start_ac(self.vin, temperature_idx=idx))
+        return f"הפקודה להדלקת המזגן על {temp} מעלות נשלחה, הרכב אמור להגיב תוך דקה עד שתיים"
+
     def _action_ac_off(self):
         saic_client.enqueue(self.user, lambda api: api.stop_ac(self.vin))
         return "הפקודה לכיבוי המזגן נשלחה"
@@ -204,6 +227,8 @@ class MgAdapter(VehicleAdapter):
             "לחץ אפס תשע להפשרת השמשה הקדמית, "
             "לחץ אחת אפס לפתיחת דלת המטען, "
             "לחץ אחת אחת להפעלת אוורור בלבד, "
+            "לחץ אחת שש עד שתיים שמונה להדלקת מזגן בטמפרטורה שבחרת, "
+            "למשל שתיים שתיים לעשרים ושתיים מעלות, "
             "לחץ כוכבית לסיום"
         )
 
@@ -213,7 +238,10 @@ class MgAdapter(VehicleAdapter):
     def handle_choice(self, choice: str):
         action = self._MENU.get(choice)
         if not action:
-            return None
+            temp = self._ac_temp_for(choice)
+            if temp is None:
+                return None
+            action = lambda self, temp=temp: self._action_ac_on_temp(temp)  # noqa: E731
         if choice not in self._READ_ONLY_CHOICES and self._vehicle_running():
             return "הרכב מונע כרגע ולכן אי אפשר לשלוח פקודות מרחוק, כבו את הרכב ונסו שוב"
         try:
