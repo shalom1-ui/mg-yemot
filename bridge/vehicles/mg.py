@@ -84,6 +84,10 @@ class MgAdapter(VehicleAdapter):
                 getattr(basic, "canBusActive", None), getattr(basic, "handBrake", None),
                 None if age is None else int(age), fresh, running,
             )
+        except saic_client.AppSessionActive:
+            # Not "unknown": the account is in use by the phone app, so no
+            # command can go through - let handle_choice announce it.
+            raise
         except Exception as e:
             log.info("Could not check engine state for user %s (%s: %s), assuming not running",
                      self.user.id, type(e).__name__, e)
@@ -235,6 +239,15 @@ class MgAdapter(VehicleAdapter):
     # Choices that only READ state (status) are allowed while the car runs.
     _READ_ONLY_CHOICES = frozenset({"05"})
 
+    # MG allows ONE active login per account: when the owner opens the iSMART
+    # app on a phone, our cloud session is dropped, and logging back in would
+    # log the app out (see saic_client.AppSessionActive). Said out loud
+    # instead of silently failing or silently kicking the app.
+    _APP_ACTIVE_MSG = (
+        "האפליקציה של הרכב פתוחה כרגע בטלפון אחר ולכן אי אפשר לשלוח פקודות דרך המערכת, "
+        "נסו שוב בעוד כמה דקות, וזכרו שחיבור דרך המערכת מנתק את האפליקציה"
+    )
+
     def handle_choice(self, choice: str):
         action = self._MENU.get(choice)
         if not action:
@@ -242,10 +255,14 @@ class MgAdapter(VehicleAdapter):
             if temp is None:
                 return None
             action = lambda self, temp=temp: self._action_ac_on_temp(temp)  # noqa: E731
-        if choice not in self._READ_ONLY_CHOICES and self._vehicle_running():
-            return "הרכב מונע כרגע ולכן אי אפשר לשלוח פקודות מרחוק, כבו את הרכב ונסו שוב"
+        if saic_client.app_session_active(self.user.id):
+            return self._APP_ACTIVE_MSG
         try:
+            if choice not in self._READ_ONLY_CHOICES and self._vehicle_running():
+                return "הרכב מונע כרגע ולכן אי אפשר לשלוח פקודות מרחוק, כבו את הרכב ונסו שוב"
             return action(self)
+        except saic_client.AppSessionActive:
+            return self._APP_ACTIVE_MSG
         except saic_client.Busy:
             return "יש עדיין פקודה קודמת בביצוע, נסו שוב בעוד כמה שניות"
         except Exception:

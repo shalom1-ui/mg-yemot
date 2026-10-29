@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import threading
+import time
 from typing import Awaitable, Callable, TypeVar
 
 from saic_ismart_client_ng import SaicApi
@@ -44,6 +46,28 @@ _call_locks_guard = threading.Lock()
 class Busy(Exception):
     """Raised by call() when another command for the same user is still
     being processed and the wait_for_lock window ran out - see call()."""
+
+
+class AppSessionActive(Exception):
+    """
+    Raised by call() when MG's cloud dropped our session EARLY - i.e. someone
+    logged in to the same account elsewhere (the iSMART app on a phone).
+    MG allows one active login per account, so re-logging in would just log
+    that app out (and the app would do the same to us next time). Instead we
+    stay out of the way for APP_COOLDOWN_SECONDS and let the caller be told.
+    """
+
+
+# How long to leave the account alone after we were kicked out by another
+# login (same idea as the upstream gateway's SAIC_RELOGIN_DELAY, which
+# defaults to 900s; shorter here because a phone caller is waiting).
+_APP_COOLDOWN = float(os.environ.get("APP_COOLDOWN_SECONDS", "300"))
+# A 401 within this many seconds of our token's known expiry is treated as
+# ordinary expiry, not as another login (clock/rounding slack).
+_EARLY_MARGIN = 300.0
+
+_token_expiry: dict[int, float | None] = {}
+_app_active_until: dict[int, float] = {}
 
 
 def _is_auth_error(e: SaicApiException) -> bool:
@@ -111,6 +135,42 @@ def _get_client(user: store.User) -> SaicApi:
         return client
 
 
+def app_session_active(user_id: int) -> bool:
+    """True while we're deliberately staying logged out because another
+    login (the phone app) took the account's one session."""
+    with _state_lock:
+        return time.time() < _app_active_until.get(user_id, 0.0)
+
+
+def _login(user: store.User, client: SaicApi, timeout: float) -> None:
+    """Log in and remember when the token should expire, so a later 401 can
+    be told apart: after that time it's plain expiry (re-login quietly),
+    before it the session was taken over by another login."""
+    run_async(client.login(), timeout=timeout)
+    expiry = getattr(client, "token_expiration", None)
+    with _state_lock:
+        _logged_in.add(user.id)
+        _token_expiry[user.id] = expiry.timestamp() if expiry else None
+
+
+def _kicked_early(user_id: int) -> bool:
+    with _state_lock:
+        expiry = _token_expiry.get(user_id)
+    return expiry is not None and time.time() < expiry - _EARLY_MARGIN
+
+
+def _mark_app_session_active(user: store.User) -> None:
+    with _state_lock:
+        _app_active_until[user.id] = time.time() + _APP_COOLDOWN
+        _logged_in.discard(user.id)
+        _token_expiry.pop(user.id, None)
+    log.warning(
+        "User %s: session dropped before its expiry - another login (the phone app?) "
+        "took the account; staying logged out for %.0fs instead of logging it out again",
+        user.id, _APP_COOLDOWN,
+    )
+
+
 def validate_credentials(user: store.User) -> SaicApi:
     """
     Build a standalone SaicApi client and log in - used only at signup time
@@ -153,6 +213,8 @@ def call(
     and Yemot itself won't wait around forever for us to answer. Slow
     commands should go through enqueue() below instead of raising this.
     """
+    if app_session_active(user.id):
+        raise AppSessionActive(f"user {user.id}: account is in use by another login")
     lock = _get_call_lock(user.id)
     if not lock.acquire(timeout=wait_for_lock):
         raise Busy(f"user {user.id} has a command still in progress")
@@ -161,13 +223,18 @@ def call(
         with _state_lock:
             already_logged_in = user.id in _logged_in
         if not already_logged_in:
-            run_async(client.login(), timeout=action_timeout)
-            with _state_lock:
-                _logged_in.add(user.id)
+            _login(user, client, action_timeout)
 
         try:
             return run_async(action(client), timeout=action_timeout)
+        except AppSessionActive:
+            raise
         except SaicApiException as e:
+            if _is_auth_error(e) and _kicked_early(user.id):
+                _mark_app_session_active(user)
+                raise AppSessionActive(
+                    f"user {user.id}: session dropped before expiry ({e})"
+                ) from e
             if _is_auth_error(e):
                 # A plain expired/missing token ("Token missing,
                 # Authentication failed!") - the login cached from earlier
@@ -181,9 +248,7 @@ def call(
                 with _state_lock:
                     _logged_in.discard(user.id)
                 try:
-                    run_async(client.login(), timeout=action_timeout)
-                    with _state_lock:
-                        _logged_in.add(user.id)
+                    _login(user, client, action_timeout)
                     return run_async(action(client), timeout=action_timeout)
                 except Exception as e2:
                     log.error(
@@ -214,7 +279,7 @@ def call(
                 user.id, type(e).__name__, e,
             )
             try:
-                run_async(client.login(), timeout=action_timeout)
+                _login(user, client, action_timeout)
                 return run_async(action(client), timeout=action_timeout)
             except SaicApiException as e2:
                 log.warning("SaicApi rejected retry for user %s: %s", user.id, e2)
@@ -240,6 +305,8 @@ def enqueue(user: store.User, action: Callable[[SaicApi], Awaitable[T]]) -> None
     def run():
         try:
             call(user, action, wait_for_lock=120.0, action_timeout=60.0)
+        except AppSessionActive as e:
+            log.warning("Background command dropped for user %s: %s", user.id, e)
         except Exception:
             log.exception("Background SaicApi command failed for user %s", user.id)
     threading.Thread(target=run, daemon=True, name=f"saic-bg-{user.id}").start()
